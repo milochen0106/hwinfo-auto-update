@@ -1,5 +1,7 @@
 # HWiNFO Auto-Update
 
+> Languages: **English** | [繁體中文](README.zh-TW.md)
+
 A small, dependency-free PowerShell toolkit that watches the **official HWiNFO release feed** and silently upgrades HWiNFO 64 to the latest **stable** version when one is published.
 
 It was written for machines where HWiNFO was installed with the official Inno Setup installer and where winget is available. No third-party modules, no scheduled task editor, no background service — just two PowerShell scripts and one Windows scheduled task.

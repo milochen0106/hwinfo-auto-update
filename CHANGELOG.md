@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-11-25
+
+### Added
+
+- `README.zh-TW.md`: a full Traditional Chinese (Taiwan) guide covering quick start, workflow, prerequisites, usage scenarios, parameters, scheduled task, logs/backups, troubleshooting, privacy audit, limitations, FAQ, and licensing.
+- Language switch links in `README.md` and `README.zh-TW.md`.
+
 ## [1.0.1] - 2026-11-25
 
 ### Changed
