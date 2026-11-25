@@ -62,16 +62,16 @@ HWiNFO 內建的「自動更新」功能是 **Pro 版專屬**。若你使用的�
 
 ### 步驟 1：取得程式
 
-將本 repo 複製或下載到一個**固定位置**（排程工作會記錄絕對路徑，之後請勿移動資料夾）：
+將本 repo 複製或下載到任何位置（例如 Downloads；這份複本只是**部署包**，排程工作不會指向它）：
 
 ```powershell
 git clone https://github.com/milochen0106/hwinfo-auto-update.git C:\Scripts\hwinfo-auto-update
 ```
 
-確認兩支腳本都在同一層：
+確認腳本與兩個 `lib` 檔案都在：
 
 ```powershell
-Get-ChildItem .\Update-HWiNFO.ps1, .\Bootstrap-HWiNFO-AutoUpdate.ps1
+Get-ChildItem .\Update-HWiNFO.ps1, .\Bootstrap-HWiNFO-AutoUpdate.ps1, .\lib\*.ps1
 ```
 
 ### 步驟 2：先只檢查（建議）
@@ -95,12 +95,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Update-HWiNFO.ps1 -CheckOn
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Bootstrap-HWiNFO-AutoUpdate.ps1
 ```
 
-系統會彈出 UAC，請按「是」。這支腳本會：
+系統會彈出 UAC，請按「是」。提升後的腳本會：
 
-1. 立即執行一次更新檢查；
-2. 註冊每日 09:00、以最高權限執行的排程工作 `HWiNFO-AutoUpdate`。
+1. 把腳本與 `lib` 複製到 ACL 硬化過的 `C:\ProgramData\HWiNFO-AutoUpdate\`，擁有者設為 `BUILTIN\Administrators`，只保留 `SYSTEM` 與系統管理員的完整控制權；
+2. 以**部署後**的腳本立即執行一次更新檢查；
+3. 註冊每日 09:00、以最高權限執行、指向部署後腳本的排程工作 `HWiNFO-AutoUpdate`。
 
-重複執行是安全的：註冊時使用 `-Force`，會覆蓋同名的舊工作。
+之後手動操作也請用部署後的路徑：
+
+```powershell
+$deployed = Join-Path $env:ProgramData 'HWiNFO-AutoUpdate'
+```
+
+重複執行是安全的：註冊時使用 `-Force`，會覆蓋同名的舊工作。若要改排程，請執行部署後的 Bootstrap；從可寫入的 clone 再次執行會被刻意擋下，除非明確帶 `-ForceRedeploy`（代表你確定要用新版本覆蓋部署包）。
 
 ---
 
@@ -157,16 +164,22 @@ flowchart TD
 
 ## 6. 使用情境與指令
 
+以下指令需要先設定部署路徑：
+
+```powershell
+$deployed = Join-Path $env:ProgramData 'HWiNFO-AutoUpdate'
+```
+
 | 情境 | 指令 |
 |---|---|
-| 只檢查、不安裝 | `powershell -NoProfile -ExecutionPolicy Bypass -File .\Update-HWiNFO.ps1 -CheckOnly` |
-| 立即更新到最新版 | `powershell -NoProfile -ExecutionPolicy Bypass -File .\Update-HWiNFO.ps1` |
-| 強制重裝同版本（修復） | `powershell -NoProfile -ExecutionPolicy Bypass -File .\Update-HWiNFO.ps1 -Force` |
-| 用手動下載好的安裝檔 | `powershell -NoProfile -ExecutionPolicy Bypass -File .\Update-HWiNFO.ps1 -InstallerPath 'C:\Temp\hwi64_860.exe'` |
+| 只檢查、不安裝 | `powershell -NoProfile -ExecutionPolicy Bypass -File "$deployed\Update-HWiNFO.ps1" -CheckOnly` |
+| 立即更新到最新版 | `powershell -NoProfile -ExecutionPolicy Bypass -File "$deployed\Update-HWiNFO.ps1"` |
+| 強制重裝同版本（修復） | `powershell -NoProfile -ExecutionPolicy Bypass -File "$deployed\Update-HWiNFO.ps1" -Force` |
+| 用手動下載好的安裝檔 | `powershell -NoProfile -ExecutionPolicy Bypass -File "$deployed\Update-HWiNFO.ps1" -InstallerPath 'C:\Temp\hwi64_860.exe'` |
 | 更新後不要自動開 HWiNFO | 加上 `-NoRestore` |
-| 改排程時間為 18:30 | `powershell -NoProfile -ExecutionPolicy Bypass -Command "& '.\Bootstrap-HWiNFO-AutoUpdate.ps1' -TaskTime '18:30'"` |
+| 改排程時間為 18:30 | `powershell -NoProfile -ExecutionPolicy Bypass -Command "& \"$deployed\Bootstrap-HWiNFO-AutoUpdate.ps1\" -TaskTime '18:30'"` |
 
-`-InstallerPath` 仍會先讀 RSS：只有真的需要更新（或給了 `-Force`）才會用到你提供的安裝檔。
+`-InstallerPath` 仍會先讀 RSS：只有真的需要更新（或給了 `-Force`）才會用到你提供的安裝檔。該檔案會先被複製到受保護的 `Downloads\` 目錄才驗證與執行，不會直接使用原始可寫入路徑。
 
 ---
 
@@ -180,8 +193,9 @@ flowchart TD
 | `-Force` | switch | 關 | 版本已相同時仍重裝（修復用）。**不會**降版 |
 | `-AllowDowngrade` | switch | 關 | 明確允許安裝比目前更舊的版本；未指定時本機版本較新就跳過 |
 | `-NoRestore` | switch | 關 | 更新後不重新啟動 HWiNFO |
-| `-InstallerPath` | string | 無 | 使用預先下載的安裝檔（同樣驗簽章） |
+| `-InstallerPath` | string | 無 | 使用預先下載的安裝檔；先複製到受保護 `Downloads\` 再驗簽章 |
 | `-InstallDir` | string | 自動偵測 | 覆寫 HWiNFO 安裝目錄 |
+| `-AllowUnprotectedRun` | switch | 關 | 僅供開發／測試：放寬「必須從受保護目錄執行」的限制 |
 | `-LogPath` | string | `<腳本目錄>\Update-HWiNFO.log` | 日誌位置 |
 
 ### `Bootstrap-HWiNFO-AutoUpdate.ps1`
@@ -192,6 +206,8 @@ flowchart TD
 | `-TaskTime` | string | `09:00` | 每日執行時間（`HH:mm`） |
 | `-InstallerPath` | string | 無 | 轉傳給 `Update-HWiNFO.ps1` |
 | `-StalePids` | int[] | 無 | 更新前先終止的舊行程 PID；只處理 `powershell`／`pwsh`，且解析出的 `-File` 參數精確等於本專案腳本路徑者 |
+| `-DeployRoot` | string | `%ProgramData%\HWiNFO-AutoUpdate` | 部署目錄；日誌、備份與暫存安裝檔都在這裡，路徑不可改 |
+| `-ForceRedeploy` | switch | 關 | 已有受保護部署時，仍允許從可寫入的 clone 重新部署；僅在刻意更新部署包時使用 |
 
 > 從 `powershell -Command` 傳陣列請用 `-StalePids @(1234,5678)`；寫成 `-StalePids 1234,5678` 會被當成單一字串。
 > `-TaskName` 不得含 `\ / : * ? " < > |`，`-TaskTime` 必須是 24 小時制 `HH:mm`；兩者都在提權**前**驗證，打錯不會留下半套設定。
@@ -209,7 +225,8 @@ flowchart TD
 | 觸發 | 每日 09:00（可用 `-TaskTime` 改） |
 | 執行權限 | Highest privileges |
 | 帳號 | 目前使用者，interactive logon |
-| 動作 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -NonInteractive -File "<repo>\Update-HWiNFO.ps1"` |
+| 動作 | `<SystemRoot>\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -NonInteractive -WindowStyle Hidden -File "%ProgramData%\HWiNFO-AutoUpdate\Update-HWiNFO.ps1"` |
+| 工作目錄 | `%ProgramData%\HWiNFO-AutoUpdate` |
 | 錯過時補跑 | 是（`StartWhenAvailable`） |
 | 重複執行個體 | `IgnoreNew` |
 | 逾時 | 15 分鐘 |
@@ -229,14 +246,17 @@ Unregister-ScheduledTask -TaskName 'HWiNFO-AutoUpdate' -Confirm:$false
 |---|---|---|
 | `Update-HWiNFO.ps1` | repo 根目錄 | 版本檢查與更新主程式 |
 | `Bootstrap-HWiNFO-AutoUpdate.ps1` | repo 根目錄 | 提升權限與註冊排程 |
-| `lib/HWiNFO.Core.ps1` | `lib/` | 純函式（版本解析、RSS 解析、PE 檢查、簽章檢查、參數驗證），由兩支腳本與測試共用 |
+| `lib/HWiNFO.Core.ps1` | `lib/` | 純函式（版本解析、RSS 解析、PE 檢查、簽章檢查、參數驗證、受保護路徑檢查），由兩支腳本與測試共用 |
+| `lib/HWiNFO.Deploy.ps1` | `lib/` | ACL 硬化與受保護部署函式，僅由 Bootstrap 載入 |
 | `tests/HWiNFO.Core.Tests.ps1` | `tests/` | Pester 測試；不連網、不安裝 |
+| `tests/HWiNFO.Deploy.Tests.ps1` | `tests/` | Pester 部署／ACL 測試；mock `icacls`，不真的改 ACL |
 | `tests/Update-HWiNFO.Workflow.Tests.ps1` | `tests/` | Pester 整合測試；以 mock 模擬所有外部效應 |
 | `.github/workflows/tests.yml` | `.github/` | CI：在 `windows-latest` 跑 Pester 與 PSScriptAnalyzer |
-| `Update-HWiNFO.log` | repo 根目錄 | 追加式執行紀錄 |
-| `Bootstrap-HWiNFO-AutoUpdate.log` | repo 根目錄 | 一次性安裝紀錄 |
-| `HWiNFO-Backups/` | repo 根目錄 | 時間戳記的 `HWiNFO64.INI` 備份 |
-| `%TEMP%\HWiNFO-AutoUpdate\` | 使用者暫存 | 備援路徑下載的安裝檔 |
+| `%ProgramData%\HWiNFO-AutoUpdate\` | 受保護 | 部署後的腳本、日誌、暫存安裝檔與 INI 備份。擁有者 `BUILTIN\Administrators`，僅 `SYSTEM` 與系統管理員可存取 |
+| `%ProgramData%\HWiNFO-AutoUpdate\Downloads\` | 受保護 | 下載或使用者提供的安裝檔，驗證前先放在這裡 |
+| `%ProgramData%\HWiNFO-AutoUpdate\HWiNFO-Backups\` | 受保護 | 時間戳記的 `HWiNFO64.INI` 備份 |
+
+Bootstrap 在提權前仍會在 clone 旁邊寫一份安裝紀錄，以備程序還沒走到 ProgramData 就失敗。
 
 日誌格式：
 
@@ -265,7 +285,7 @@ Install-Module Pester -MinimumVersion 5.5.0 -Force -Scope CurrentUser
 Invoke-Pester -Path ./tests -Output Detailed
 ```
 
-測試不連網、不安裝 HWiNFO，也不需要系統管理員權限。純函式測試使用 XML fixture 與 Windows 內建的簽章檔案；整合測試把 `Update-HWiNFO.ps1` 以 dot-source 方式指向暫時安裝目錄，並 mock 掉 winget、下載、安裝結束碼與運行中行程，涵蓋 winget 成功／失敗、備援下載、winget 成功但版本未變、驗證失敗，以及更新失敗時是否依 `-NoRestore` 重啟 HWiNFO。CI（`.github/workflows/tests.yml`）在每次 push 與 PR 執行同一套測試、以 error 等級跑 PSScriptAnalyzer，並用 Windows PowerShell 5.1 解析所有 `.ps1`。文件頂端的 badge 指向 `main` 最近一次執行結果，個別紀錄在 Actions 分頁。
+測試不連網、不安裝 HWiNFO、不真的改 ACL，也不需要系統管理員權限。純函式測試使用 XML fixture 與 Windows 內建的簽章檔案；部署測試 mock `icacls` 並把 `ProgramData` 導向暫時目錄；整合測試把 `Update-HWiNFO.ps1` 以 dot-source 搭配 `-AllowUnprotectedRun` 指向暫時安裝目錄，並 mock 掉 winget、下載、安裝結束碼與運行中行程，涵蓋 winget 成功／失敗、備援下載、winget 成功但版本未變、驗證失敗、更新失敗時是否依 `-NoRestore` 重啟 HWiNFO，以及使用者提供安裝檔會先暫存到 `Downloads\`。CI（`.github/workflows/tests.yml`）在每次 push 與 PR 執行同一套測試、以 error 等級跑 PSScriptAnalyzer，並用 Windows PowerShell 5.1 解析所有 `.ps1`。文件頂端的 badge 指向 `main` 最近一次執行結果，個別紀錄在 Actions 分頁。
 
 目前沒有會真正執行升級或觸發 UAC 提權的自動化測試；那些路徑仍以 `-CheckOnly` 加人工檢視日誌驗證。
 
@@ -280,6 +300,8 @@ Invoke-Pester -Path ./tests -Output Detailed
 | winget 下載卡住幾分鐘 | winget manifest 指向較慢的鏡像（`sac.sk`） | 等待，或改用手動下載的安裝檔 + `-InstallerPath` |
 | UAC 被取消／逾時 | 提升行程根本沒啟動，未做任何異動 | 重跑 Bootstrap 並按「是」 |
 | `Access denied`（`Wait-Process`／`Stop-Process`） | 非提升行程不能控制提升行程 | 從提升後的 Bootstrap 用 `-StalePids` 清理 |
+| `Refusing to run from an unprotected location: ...` | 直接從 Downloads／repo clone 執行 `Update-HWiNFO.ps1` | 改執行 `%ProgramData%\HWiNFO-AutoUpdate\Update-HWiNFO.ps1`；開發或測試才用 `-AllowUnprotectedRun` |
+| `A protected deployment already exists ...` | 從可寫入的 clone 重跑 Bootstrap | 改從 `%ProgramData%\HWiNFO-AutoUpdate\Bootstrap-HWiNFO-AutoUpdate.ps1` 執行；確定要覆蓋部署包才加 `-ForceRedeploy` |
 | 出現 Beta 但沒安裝 | 設計如此，Beta／RC 被篩掉 | 等正式版；若確定要預發布，需修改 `Get-LatestStableVersion` |
 | HWiNFO 短暫消失 | 更新前會關閉它，完成後再開 | 不希望自動開就用 `-NoRestore` |
 | `Unexpected publisher '...'` 或 `Authenticode signature is not valid` | 安裝檔不是 `REALiX, s.r.o.` 簽章（代理頁面、鏡像 HTML、被竄改） | 重新從 `https://www.hwinfo.com/download/` 下載；不要繞過檢查 |
@@ -297,13 +319,16 @@ Invoke-Pester -Path ./tests -Output Detailed
 - **Git commit metadata**：已全面改用 `milochen0106@users.noreply.github.com`，不再暴露個人 Gmail。
 - **來源限制**：版本資訊只取自官方 RSS；安裝檔只來自官方下載頁或 winget manifest。
 - **雜湊驗證**：winget 路徑比對的是**套件 manifest 中記錄的 SHA-256**，不是另外由 REALiX 發布的雜湊值，因此不把它當成「發行者提供」。直接下載路徑在執行前做三項檢查：(1) PE 結構檢查（`MZ`、`e_lfanew` 處的 PE 簽章、機器類型非零、至少一個 section、PE32/PE32+ optional header）——這只是「外形」檢查，不能用來證明檔案完整；(2) Authenticode 簽章狀態為 `Valid`；(3) 以可處理引號的解析器取出憑證**組織欄位 `O`，並要求精確等於 `REALiX, s.r.o.`**。只含「REALiX」字樣或由其他發行者簽出的有效憑證都會被拒絕。比對的是法律實體而非憑證指紋，因此同一發行者換發新憑證仍可通過。
-- **`-InstallerPath` 同樣驗證**：你提供的安裝檔也要通過上述三項檢查，被掉包或損毀的檔案不會被執行。
+- **`-InstallerPath` 同樣驗證**：你提供的安裝檔會先複製到受保護的 `Downloads\`，再對該副本做上述三項檢查；原始可寫入路徑被掉包或損毀都不會被執行。
 - **下載備援**：先寫入 `.part` 暫存檔，超過 10 MB 才會改名為正式檔；curl 失敗時先清掉不完整檔案，再試 `Invoke-WebRequest`。上次留下的截斷檔不會被當成成功下載。
 - **PID 誤殺防護**：`-StalePids` 只接受 `powershell`／`pwsh`，且從命令列解析出的 `-File` 參數精確等於本專案腳本路徑的行程；只是把路徑寫在 `-Command` 或其他參數中不算。Windows 會重用 PID，單靠 ID 不足以證明身分；在檢查與終止之間仍有極小的 TOCTOU 時窗，因此請只傳入剛觀察到、來源可信的 PID。
 - **無憑證儲存**：腳本不保存任何憑證、token 或個人化設定，只讀取公開 HTTPS 端點與本機安裝資訊。
 - **權限透明**：提升權限由 Bootstrap 明確觸發 UAC；在新的電腦上請先審視腳本再按「是」。
+- **提權邊界（1.3.0+）**：Bootstrap 會把腳本與 `lib` 部署到 `C:\ProgramData\HWiNFO-AutoUpdate\`，移除繼承的 ACL、把擁有者改成 `BUILTIN\Administrators`，只授權 `SYSTEM` 與系統管理員完整控制。排程工作執行的是部署後的腳本，不是 clone。`Update-HWiNFO.ps1` 拒絕從使用者可寫入目錄執行（除非明確給 `-AllowUnprotectedRun`）；部署目錄若是 reparse point 會被拒絕；從可寫入 clone 再次部署會被擋下，除非給 `-ForceRedeploy`。這切斷了「任何同使用者程序改寫 Downloads／Desktop 裡的腳本 → 09:00 以管理員執行」的路徑。
+  - 改擁有者是必要的：若擁有者仍是個別管理員帳號，該帳號的一般 token 仍隱含 `WRITE_DAC`，可以把自己寫回去。
+  - 剩餘風險：排程工作新建的檔案（日誌、備份、暫存安裝檔）在 Windows 預設下以建立者為擁有者；同一帳號的一般行程仍可能改這些檔案的 DACL。腳本與 `lib` 不受影響（部署時已硬化，排程工作不會重建它們）；暫存安裝檔在驗證與執行之間仍有殘留 TOCTOU，此風險不跨帳號邊界。詳見 `SECURITY.md`。
 
-> 這套檢查**無法**防禦：官方 RSS 被入侵，或官方簽章程式碼簽章憑證被竊。因為信任錨點就是官方本身，RSS 被改寫或官方簽出的惡意安裝檔都會通過驗證。PE 結構檢查也無法證明檔案在簽章後沒被動過，完整性是由 Authenticode 負責。
+> 這套檢查**無法**防禦：官方 RSS 被入侵，或官方簽章程式碼簽章憑證被竊。因為信任錨點就是官方本身，RSS 被改寫或官方簽出的惡意安裝檔都會通過驗證。PE 結構檢查也無法證明檔案在簽章後沒被動過，完整性是由 Authenticode 負責。它也無法防禦操作者刻意用 `-ForceRedeploy` 部署被竄改的套件，那就等於自己以管理員執行不受信任的程式。
 
 > 補充說明：force push 已把舊 commit 從分支歷史移除，但 GitHub 短期內仍可能透過舊 SHA 直接存取該物件；若要求澈底清除，需向 GitHub Support 提出請求。
 

@@ -274,3 +274,29 @@ Describe 'Test-ValidTaskName' {
         Test-ValidTaskName -Value ('a' * 201) | Should -BeFalse
     }
 }
+
+Describe 'Test-ProtectedRunLocation' {
+    BeforeAll {
+        $script:Protected = 'C:\ProgramData\HWiNFO-AutoUpdate'
+    }
+
+    It 'accepts the exact protected deployment directory' {
+        Test-ProtectedRunLocation -ScriptDirectory 'C:\ProgramData\HWiNFO-AutoUpdate' `
+            -ProgramDataRoot $script:Protected | Should -BeTrue
+    }
+
+    It 'accepts differences in case and a trailing backslash' {
+        Test-ProtectedRunLocation -ScriptDirectory 'c:\programdata\hwinfo-autoupdate\' `
+            -ProgramDataRoot $script:Protected | Should -BeTrue
+    }
+
+    It 'rejects a user-writable clone' {
+        Test-ProtectedRunLocation -ScriptDirectory 'C:\Users\someone\Downloads\hwinfo-auto-update' `
+            -ProgramDataRoot $script:Protected | Should -BeFalse
+    }
+
+    It 'rejects a sibling directory with the same prefix' {
+        Test-ProtectedRunLocation -ScriptDirectory 'C:\ProgramData\HWiNFO-AutoUpdate-Evil' `
+            -ProgramDataRoot $script:Protected | Should -BeFalse
+    }
+}

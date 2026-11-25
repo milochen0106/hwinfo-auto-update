@@ -36,6 +36,11 @@
     Override the HWiNFO installation directory. By default it is detected from the
     Windows uninstall registry keys, then from the standard Program Files paths.
 
+.PARAMETER AllowUnprotectedRun
+    Allow the script to run from a user-writable directory. This is for development
+    and tests only; a scheduled high-privilege task must use the ACL-hardened
+    deployment created by Bootstrap-HWiNFO-AutoUpdate.ps1.
+
 .PARAMETER LogPath
     Log file path. Defaults to Update-HWiNFO.log next to this script.
 
@@ -60,6 +65,7 @@ param(
     [switch] $NoRestore,
     [string] $InstallerPath,
     [string] $InstallDir,
+    [switch] $AllowUnprotectedRun,
     [string] $LogPath
 )
 
@@ -72,16 +78,6 @@ $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 . (Join-Path $PSScriptRoot 'lib\HWiNFO.Core.ps1')
-
-# ---------------------------------------------------------------- constants
-$RssUrl      = 'https://www.hwinfo.com/news.xml/'
-$DownloadUrl = 'https://www.hwinfo.com/download/'
-$WingetId    = 'REALiX.HWiNFO'
-$TempRoot    = Join-Path $env:TEMP 'HWiNFO-AutoUpdate'
-$BackupRoot  = Join-Path $PSScriptRoot 'HWiNFO-Backups'
-# Every HWiNFO installer is ~20 MB; anything far smaller is an error page or a
-# truncated transfer, not an installer.
-$MinimumInstallerBytes = 10MB
 
 # ---------------------------------------------------------------- logging
 function Write-UpdateLog {
@@ -98,6 +94,28 @@ function Write-UpdateLog {
         Write-Warning "Cannot write log file $LogPath : $($_.Exception.Message)"
     }
 }
+
+# ---------------------------------------------------------------- location gate
+# A high-privilege scheduled task must never load its logic from a writable folder.
+# Tests and ad-hoc analysis can opt out explicitly with -AllowUnprotectedRun.
+$ProtectedRoot = Join-Path $env:ProgramData 'HWiNFO-AutoUpdate'
+if (-not $AllowUnprotectedRun -and
+    -not (Test-ProtectedRunLocation -ScriptDirectory $PSScriptRoot -ProgramDataRoot $ProtectedRoot)) {
+    Write-UpdateLog "Refusing to run from an unprotected location: $PSScriptRoot. Deploy the scripts to $ProtectedRoot with Bootstrap-HWiNFO-AutoUpdate.ps1, or pass -AllowUnprotectedRun for development/tests." 'ERROR'
+    throw "Unprotected script location: $PSScriptRoot"
+}
+
+# ---------------------------------------------------------------- constants
+$RssUrl      = 'https://www.hwinfo.com/news.xml/'
+$DownloadUrl = 'https://www.hwinfo.com/download/'
+$WingetId    = 'REALiX.HWiNFO'
+# The staging directory inherits the protected deployment ACL, so a downloaded or
+# supplied installer cannot be swapped between verification and execution.
+$TempRoot    = Join-Path $PSScriptRoot 'Downloads'
+$BackupRoot  = Join-Path $PSScriptRoot 'HWiNFO-Backups'
+# Every HWiNFO installer is ~20 MB; anything far smaller is an error page or a
+# truncated transfer, not an installer.
+$MinimumInstallerBytes = 10MB
 
 # ---------------------------------------------------------------- path detection
 function Get-InstallDirectory {
@@ -267,8 +285,14 @@ function Invoke-ManualUpgrade {
         if (-not (Test-Path -LiteralPath $LocalInstaller)) {
             throw "Specified installer does not exist: $LocalInstaller"
         }
-        $installer = $LocalInstaller
-        Write-UpdateLog "Using specified installer: $installer"
+        # Copy the caller's file into the protected staging area first. Verification
+        # and execution then use the staged copy, never the original writable path.
+        if (-not (Test-Path -LiteralPath $TempRoot)) {
+            New-Item -ItemType Directory -Path $TempRoot -Force | Out-Null
+        }
+        $installer = Join-Path $TempRoot ('manual-{0}.exe' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        Copy-Item -LiteralPath $LocalInstaller -Destination $installer -Force
+        Write-UpdateLog "Staged specified installer: $LocalInstaller -> $installer"
     } else {
         $url = Get-InstallerUrl -Version $Version
         if (-not (Test-Path -LiteralPath $TempRoot)) {

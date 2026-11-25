@@ -102,25 +102,40 @@ In short: on a typical Windows 11 machine, the **only** things you need to provi
 
 ## Installation
 
-1. Clone or download this repository into a permanent folder, for example `C:\Users\<you>\Scripts\hwinfo-auto-update`.
-   Keep the folder path stable — the scheduled task stores an absolute path to `Update-HWiNFO.ps1`.
-2. Verify the two scripts are present in the same directory:
+1. Clone or download this repository into any folder (Downloads is fine — this
+   copy is only the deployment package).
+2. Verify the scripts and both `lib` files are present:
    ```powershell
-   Get-ChildItem .\Update-HWiNFO.ps1, .\Bootstrap-HWiNFO-AutoUpdate.ps1
+   Get-ChildItem .\Update-HWiNFO.ps1, .\Bootstrap-HWiNFO-AutoUpdate.ps1, .\lib\*.ps1
    ```
 3. Run the one-time bootstrap from a normal PowerShell window and approve the UAC prompt:
    ```powershell
    powershell -NoProfile -ExecutionPolicy Bypass -File .\Bootstrap-HWiNFO-AutoUpdate.ps1
    ```
 
-The bootstrap performs an immediate update check and registers the daily task. It is safe to re-run; `Register-ScheduledTask -Force` replaces an existing task with the same name.
+The elevated bootstrap copies the scripts into the ACL-hardened
+`C:\ProgramData\HWiNFO-AutoUpdate\`, performs an immediate update check using the
+**deployed** copy, and registers the daily task against that same protected path.
+Afterwards, use the deployed scripts for manual runs:
+
+```powershell
+$deployed = Join-Path $env:ProgramData 'HWiNFO-AutoUpdate'
+```
+
+Re-running the bootstrap is safe. To change the schedule, run the deployed
+bootstrap (`"$deployed\Bootstrap-HWiNFO-AutoUpdate.ps1"`) so `lib` resolves from
+the protected directory. Running it again from a writable clone is deliberately
+blocked unless `-ForceRedeploy` is passed; that switch is for intentionally
+replacing the deployed package with a newer release. `Register-ScheduledTask -Force`
+still replaces an existing task with the same name.
 
 ## Usage
 
 ### 1. Check only (no changes)
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\Update-HWiNFO.ps1 -CheckOnly
+$deployed = Join-Path $env:ProgramData 'HWiNFO-AutoUpdate'
+powershell -NoProfile -ExecutionPolicy Bypass -File "$deployed\Update-HWiNFO.ps1" -CheckOnly
 ```
 
 Typical output:
@@ -136,21 +151,23 @@ Typical output:
 Run as administrator (or let the scheduled task run it):
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\Update-HWiNFO.ps1
+$deployed = Join-Path $env:ProgramData 'HWiNFO-AutoUpdate'
+powershell -NoProfile -ExecutionPolicy Bypass -File "$deployed\Update-HWiNFO.ps1"
 ```
 
 ### 3. Repair / reinstall the same version
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\Update-HWiNFO.ps1 -Force
+powershell -NoProfile -ExecutionPolicy Bypass -File "$deployed\Update-HWiNFO.ps1" -Force
 ```
 
 ### 4. Use a pre-downloaded installer
 
-Useful on a machine with a slow or filtered winget source:
+Useful on a machine with a slow or filtered winget source. The file is copied into
+the protected `Downloads\` area before it is verified and executed:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\Update-HWiNFO.ps1 -InstallerPath 'C:\Temp\hwi64_860.exe'
+powershell -NoProfile -ExecutionPolicy Bypass -File "$deployed\Update-HWiNFO.ps1" -InstallerPath 'C:\Temp\hwi64_860.exe'
 ```
 
 The script still reads the RSS feed first: the supplied installer is only used if an update is actually needed (or `-Force` is given).
@@ -158,7 +175,7 @@ The script still reads the RSS feed first: the supplied installer is only used i
 ### 5. Change the schedule
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "& '.\Bootstrap-HWiNFO-AutoUpdate.ps1' -TaskName 'HWiNFO-AutoUpdate' -TaskTime '18:30'"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "& \"$deployed\Bootstrap-HWiNFO-AutoUpdate.ps1\" -TaskName 'HWiNFO-AutoUpdate' -TaskTime '18:30'"
 ```
 
 ## Scheduled task
@@ -171,7 +188,8 @@ Created by `Bootstrap-HWiNFO-AutoUpdate.ps1`:
 | Trigger | Daily at `09:00` (configurable via `-TaskTime`) |
 | Run level | Highest privileges |
 | Principal | Current user, interactive logon |
-| Action | `powershell.exe -NoProfile -ExecutionPolicy Bypass -NonInteractive -File "<repo>\Update-HWiNFO.ps1"` |
+| Action | `<SystemRoot>\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -NonInteractive -WindowStyle Hidden -File "%ProgramData%\HWiNFO-AutoUpdate\Update-HWiNFO.ps1"` |
+| Working directory | `%ProgramData%\HWiNFO-AutoUpdate` |
 | Start when available | Yes — a missed 09:00 run is executed at next logon |
 | Multiple instances | IgnoreNew |
 | Execution time limit | 15 minutes |
@@ -193,8 +211,9 @@ Unregister-ScheduledTask -TaskName 'HWiNFO-AutoUpdate' -Confirm:$false
 | `-Force` | switch | off | Reinstall even when the installed version already equals the announced version. Never downgrades. |
 | `-AllowDowngrade` | switch | off | Explicitly permit installing an older version than the one currently installed. Without it, a locally newer build is left untouched. |
 | `-NoRestore` | switch | off | Do not restart HWiNFO after the upgrade. |
-| `-InstallerPath` | string | none | Use a pre-downloaded installer instead of winget / network download. |
+| `-InstallerPath` | string | none | Use a pre-downloaded installer. It is copied into the protected `Downloads\` area first and validated there, never at the writable original path. |
 | `-InstallDir` | string | auto-detected | Override the HWiNFO installation directory. |
+| `-AllowUnprotectedRun` | switch | off | Development/tests only. Bypass the requirement that the script run from the ACL-hardened `%ProgramData%\HWiNFO-AutoUpdate\` directory. |
 | `-LogPath` | string | `<script dir>\Update-HWiNFO.log` | Log file location. |
 
 ### Bootstrap-HWiNFO-AutoUpdate.ps1
@@ -205,6 +224,8 @@ Unregister-ScheduledTask -TaskName 'HWiNFO-AutoUpdate' -Confirm:$false
 | `-TaskTime` | string | `09:00` | Daily run time (`HH:mm`). |
 | `-InstallerPath` | string | none | Passed through to `Update-HWiNFO.ps1`. |
 | `-StalePids` | int[] | none | Process IDs of a previous stuck update to terminate before upgrading. Only listed PIDs are touched, and only if they belong to `powershell`/`pwsh` and the parsed `-File` argument is exactly one of this project's scripts. |
+| `-DeployRoot` | string | `%ProgramData%\HWiNFO-AutoUpdate` | Protected directory for the deployed scripts, logs, backups and staged installers. Must stay at that path. |
+| `-ForceRedeploy` | switch | off | Allow redeployment from a user-writable clone even when a protected deployment already exists. Use only when you intentionally update the deployed package. |
 
 Note: when passing an array from `powershell -Command`, use `-StalePids @(1234,5678)`; `-StalePids 1234,5678` is parsed as a single string by PowerShell's command-line binding. `-TaskName` must be a valid task name (no `\ / : * ? " < > |`) and `-TaskTime` must be `HH:mm` in 24-hour form; both are validated before elevation, so a typo never leaves a half-configured task behind.
 
@@ -216,16 +237,18 @@ Note: when passing an array from `powershell -Command`, use `-StalePids @(1234,5
 | --- | --- | --- |
 | `Update-HWiNFO.ps1` | repository root | Version check and upgrade logic. |
 | `Bootstrap-HWiNFO-AutoUpdate.ps1` | repository root | Elevation + task registration. |
-| `lib/HWiNFO.Core.ps1` | `lib/` | Pure helper functions (version parsing, feed parsing, PE check, signature check, input validation). Dot-sourced by both scripts and by the tests. |
+| `lib/HWiNFO.Core.ps1` | `lib/` | Pure helper functions (version parsing, feed parsing, PE check, signature check, input validation, protected-location check). Dot-sourced by both scripts and by the tests. |
+| `lib/HWiNFO.Deploy.ps1` | `lib/` | ACL hardening and protected deployment helpers. Dot-sourced by the bootstrap only. |
 | `tests/HWiNFO.Core.Tests.ps1` | `tests/` | Pester tests for the helpers; no network and no installation. |
+| `tests/HWiNFO.Deploy.Tests.ps1` | `tests/` | Pester tests for deployment/ACL helpers with `icacls` mocked; no real ACL changes. |
 | `tests/Update-HWiNFO.Workflow.Tests.ps1` | `tests/` | Pester integration tests of the workflow with all external effects mocked. |
 | `.github/workflows/tests.yml` | `.github/` | CI: Pester + PSScriptAnalyzer on `windows-latest`. |
-| `Update-HWiNFO.log` | repository root | Append-only run log. |
-| `Bootstrap-HWiNFO-AutoUpdate.log` | repository root | One-time setup log. |
-| `HWiNFO-Backups/` | repository root | Timestamped `HWiNFO64.INI` backups. |
-| `%TEMP%\HWiNFO-AutoUpdate\` | user temp | Installers downloaded by the fallback path. |
+| `%ProgramData%\HWiNFO-AutoUpdate\` | protected | Deployed scripts, logs, staged installers and INI backups. Owner: `BUILTIN\Administrators`; only `SYSTEM` and Administrators have access. |
+| `%ProgramData%\HWiNFO-AutoUpdate\Downloads\` | protected | Downloaded or caller-supplied installers, staged before verification. |
+| `%ProgramData%\HWiNFO-AutoUpdate\HWiNFO-Backups\` | protected | Timestamped `HWiNFO64.INI` backups. |
 
-`*.log`, `HWiNFO-Backups/` and `*.exe` are excluded via `.gitignore`.
+Logs, backups and `*.exe` are excluded via `.gitignore`. Bootstrap also writes a
+pre-elevation log next to the clone (where it can fail before reaching ProgramData).
 
 ## Logging and backups
 
@@ -256,7 +279,7 @@ Install-Module Pester -MinimumVersion 5.5.0 -Force -Scope CurrentUser
 Invoke-Pester -Path ./tests -Output Detailed
 ```
 
-The suite runs unprivileged and never touches the network or an installed HWiNFO. Helper tests use XML fixtures and Windows-signed binaries. Integration tests dot-source `Update-HWiNFO.ps1` against a temporary install directory and mock every external effect (winget, download, installer exit code, running processes), covering winget success/failure, the direct-download fallback, an unchanged binary after winget reports success, verification failure, and restart-on-failure with and without `-NoRestore`. CI (`.github/workflows/tests.yml`) runs the same tests plus PSScriptAnalyzer (error severity) and a Windows PowerShell 5.1 parse check on every push and pull request. The badge at the top of this file links to the latest run on `main`; individual runs are also listed on the Actions tab.
+The suite runs unprivileged and never touches the network, real ACLs or an installed HWiNFO. Helper tests use XML fixtures and Windows-signed binaries; deployment tests mock `icacls` and redirect `ProgramData` to a temp directory. Integration tests dot-source `Update-HWiNFO.ps1` with `-AllowUnprotectedRun` against a temporary install directory and mock every external effect (winget, download, installer exit code, running processes), covering winget success/failure, the direct-download fallback, an unchanged binary after winget reports success, verification failure, restart-on-failure with and without `-NoRestore`, and staging of a caller-supplied installer into `Downloads\`. CI (`.github/workflows/tests.yml`) runs the same tests plus PSScriptAnalyzer (error severity) and a Windows PowerShell 5.1 parse check on every push and pull request. The badge at the top of this file links to the latest run on `main`; individual runs are also listed on the Actions tab.
 
 No test performs a real upgrade or exercises UAC elevation; those paths are still verified manually with `-CheckOnly` and by reading the logs.
 
@@ -286,14 +309,15 @@ No test performs a real upgrade or exercises UAC elevation; those paths are stil
   2. Authenticode signature status is `Valid`;
   3. the signer's **organization field (`O`) must equal `REALiX, s.r.o.` exactly**, after quote-aware parsing of the subject. A valid certificate from any other publisher, or one that merely *contains* the vendor name, is rejected. The comparison is on the legal entity rather than a thumbprint, so certificate renewal by the same publisher keeps working.
   The SHA-256 is then logged for your own auditing, but it is not pinned.
-- `-InstallerPath` runs the same checks, so a tampered file is rejected before execution.
+- `-InstallerPath` is copied into the protected `Downloads\` directory first; the same checks run on that staged copy, so a tampered file at the writable original path is rejected or replaced before execution.
 - Downloads go to a `.part` file and are promoted only after a minimum-size check (10 MB); a failed `curl.exe` run discards its partial file before `Invoke-WebRequest` is tried. A stale or truncated file from an earlier run is never reused.
 - `-StalePids` refuses to stop a PID unless it belongs to `powershell`/`pwsh` **and** the parsed `-File` argument is exactly one of this project's scripts. A path appearing elsewhere in the command line (for example as a value to `-Command` or another parameter) is not enough — Windows can reuse PIDs, so an ID alone is not proof of identity. A residual TOCTOU race remains between verification and termination; use only fresh, trusted PIDs.
 - The scripts store no credentials, tokens, or personally identifiable configuration; they only read public HTTPS endpoints and local installation metadata.
 - Git commit metadata for this repository uses a GitHub noreply address; no personal email address is exposed in the public history.
 - UAC elevation is requested explicitly by the bootstrap. Review the script before approving elevation on a new machine.
+- **Protected deployment**: the bootstrap copies the scripts to `%ProgramData%\HWiNFO-AutoUpdate\`, removes inherited ACLs, sets the owner to `BUILTIN\Administrators`, and grants access only to `SYSTEM` and Administrators. The scheduled task runs the deployed copy, not the clone. `Update-HWiNFO.ps1` refuses to run from a user-writable directory unless `-AllowUnprotectedRun` is explicitly given. A reparse point as the deployment root is rejected, and a second bootstrap from a writable clone is blocked unless `-ForceRedeploy` is passed. This closes the path where any process under the user's account could edit a script in Downloads/Desktop and have it run as administrator at 09:00.
 
-What this does **not** protect against: a compromised vendor feed or a stolen vendor code-signing certificate. Both an RSS hijack and a signed malicious installer would pass these checks, because the trust anchor is the vendor itself. A full PE parse also cannot prove that the file was not modified *after* signing — the signature check is the integrity control.
+What this does **not** protect against: a compromised vendor feed or a stolen vendor code-signing certificate. Both an RSS hijack and a signed malicious installer would pass these checks, because the trust anchor is the vendor itself. A full PE parse also cannot prove that the file was not modified *after* signing — the signature check is the integrity control. It also does not protect against an operator who deliberately deploys a tampered package with `-ForceRedeploy`, or against a process running under the operator's own account changing a staged installer's DACL between verification and execution (a residual TOCTOU; see `SECURITY.md`).
 
 ## Limitations
 

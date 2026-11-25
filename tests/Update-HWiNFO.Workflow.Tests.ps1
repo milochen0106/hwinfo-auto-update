@@ -20,9 +20,12 @@ BeforeAll {
 
     # A dot-source defines the functions but must not start the update or call exit.
     . (Join-Path $PSScriptRoot '..\Update-HWiNFO.ps1') `
-        -InstallDir $script:FakeInstallDir -LogPath $script:FakeLog
+        -InstallDir $script:FakeInstallDir -LogPath $script:FakeLog -AllowUnprotectedRun
 
-    # Keep every side effect (backup copies, log lines) inside the temp directory.
+    # Keep every side effect (backup copies, staged installers, log lines) inside
+    # the temp directory instead of the repo's protected Downloads folder.
+    $TempRoot = Join-Path $script:TestRoot 'Downloads'
+    New-Item -ItemType Directory -Path $TempRoot -Force | Out-Null
     $BackupRoot = Join-Path $script:TestRoot 'HWiNFO-Backups'
     Mock -CommandName Write-UpdateLog -MockWith { }
 }
@@ -162,6 +165,11 @@ Describe 'Invoke-ManualUpgrade' {
         Mock -CommandName Get-FileHash -MockWith { @{ Hash = 'TESTHASH' } }
     }
 
+    BeforeEach {
+        Get-ChildItem -LiteralPath $TempRoot -Filter 'manual-*.exe' -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+
     It 'aborts when the installer returns a non-zero exit code' {
         $installer = Join-Path $script:TestRoot 'failing-installer.exe'
         New-Item -ItemType File -Path $installer -Force | Out-Null
@@ -178,5 +186,17 @@ Describe 'Invoke-ManualUpgrade' {
 
         { Invoke-ManualUpgrade -Version '8.60' -LocalInstaller $installer } |
             Should -Not -Throw
+    }
+
+    It 'copies a supplied installer into the protected staging directory' {
+        $source = Join-Path $script:TestRoot 'source-installer.exe'
+        Set-Content -LiteralPath $source -Value 'payload' -Encoding UTF8
+        Mock -CommandName Start-Process -MockWith { [pscustomobject]@{ ExitCode = 0 } }
+
+        Invoke-ManualUpgrade -Version '8.60' -LocalInstaller $source
+
+        $staged = @(Get-ChildItem -LiteralPath $TempRoot -Filter 'manual-*.exe')
+        $staged.Count | Should -Be 1
+        (Get-Content -LiteralPath $staged[0].FullName -Raw).Trim() | Should -Be 'payload'
     }
 }

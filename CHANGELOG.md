@@ -5,6 +5,53 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-11-26
+
+Privilege-boundary hardening. The scheduled task no longer runs code from a
+user-writable directory. No new dependencies and no change to the update source
+or the trust anchor.
+
+### Added
+
+- `lib/HWiNFO.Deploy.ps1`: protected-deployment helpers. The bootstrap copies
+  `Update-HWiNFO.ps1`, both `lib\*.ps1` files and itself into
+  `%ProgramData%\HWiNFO-AutoUpdate\`, resets any pre-existing explicit ACEs with
+  `icacls /reset`, removes inherited ACLs, sets the owner to
+  `BUILTIN\Administrators`, and grants full control only to `SYSTEM` and
+  `BUILTIN\Administrators`. Reparse points at the root or below it are rejected.
+- `Test-ProtectedRunLocation` in `lib/HWiNFO.Core.ps1`: a pure path comparison
+  used by `Update-HWiNFO.ps1` to refuse execution from a writable directory.
+- `-DeployRoot` and `-ForceRedeploy` on the bootstrap. After the first deployment,
+  a second bootstrap from a writable clone is rejected unless `-ForceRedeploy`
+  is given, so a tampered clone cannot silently replace the protected copy.
+- `-AllowUnprotectedRun` on `Update-HWiNFO.ps1` for development and tests only.
+- `tests/HWiNFO.Deploy.Tests.ps1`: four tests with `icacls` mocked and
+  `ProgramData` redirected to a temp directory; no real ACL changes. Four
+  protected-location helper tests and one staging test were added elsewhere
+  (69 tests total).
+- The scheduled task now uses an absolute `powershell.exe` path,
+  `-WindowStyle Hidden`, and `-WorkingDirectory` pointing at the protected root.
+  Its action targets the deployed script, never the clone.
+
+### Changed
+
+- The staging directory moved from `%TEMP%\HWiNFO-AutoUpdate\` to
+  `%ProgramData%\HWiNFO-AutoUpdate\Downloads\`, which inherits the hardened ACL.
+  A caller-supplied `-InstallerPath` is copied there before verification, so the
+  writable original path is never executed.
+- Logs and INI backups now live under the protected root instead of the clone.
+- Both READMEs, `SECURITY.md` and this file document the privilege boundary, the
+  owner/`WRITE_DAC` requirement, and the residual staged-installer TOCTOU.
+
+### Known limitations
+
+- Files newly created by the scheduled task (logs, backups, staged installers)
+  take the creating account as owner under Windows defaults. A process running
+  under the operator's own account could still change such a file's DACL between
+  verification and execution. This does not cross an account boundary and is not
+  eliminated by the directory ACL; see `SECURITY.md`.
+- The existing `-StalePids` TOCTOU remains unchanged.
+
 ## [1.2.0] - 2026-11-26
 
 Reliability pass on the update workflow itself. No new dependencies, no change to the public parameters or to the update paths.

@@ -275,3 +275,28 @@ function Test-IsElevated {
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
+
+function Test-ProtectedRunLocation {
+    <#
+    .SYNOPSIS
+        Returns $true when a script directory is the protected deployment root.
+
+    .DESCRIPTION
+        A scheduled task with highest privileges must only load scripts from the
+        ACL-hardened location created by the bootstrap. This is a pure path
+        comparison; it does not inspect ACLs (that is done by the bootstrap when
+        it deploys) and it does not resolve reparse points.
+    #>
+    param(
+        [Parameter(Mandatory)][string] $ScriptDirectory,
+        [string] $ProgramDataRoot
+    )
+
+    if (-not $ProgramDataRoot) {
+        $ProgramDataRoot = Join-Path $env:ProgramData 'HWiNFO-AutoUpdate'
+    }
+
+    $expected = [IO.Path]::GetFullPath($ProgramDataRoot).TrimEnd('\')
+    $actual   = [IO.Path]::GetFullPath($ScriptDirectory).TrimEnd('\')
+    return [string]::Equals($actual, $expected, [StringComparison]::OrdinalIgnoreCase)
+}

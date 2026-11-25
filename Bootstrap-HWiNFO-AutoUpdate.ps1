@@ -7,10 +7,15 @@
     Writing to Program Files and registering a task with "highest privileges" both
     require elevation. Running this script triggers a UAC prompt; approve it.
     The elevated process then:
-      1. Terminates stale update processes listed in -StalePids (optional repair).
-      2. Runs Update-HWiNFO.ps1 (upgrades to the latest stable release).
-      3. Registers the scheduled task HWiNFO-AutoUpdate (daily, highest privileges).
-    Results are written to Bootstrap-HWiNFO-AutoUpdate.log next to this script.
+      1. Copies the scripts and lib into the ACL-hardened %ProgramData%\HWiNFO-AutoUpdate,
+         owned by BUILTIN\Administrators with only SYSTEM and Administrators granted
+         access. Downloads, logs and backups live under that protected root as well.
+      2. Terminates stale update processes listed in -StalePids (optional repair).
+      3. Runs the deployed Update-HWiNFO.ps1 (upgrades to the latest stable release).
+      4. Registers the scheduled task HWiNFO-AutoUpdate (daily, highest privileges)
+         pointing at the deployed script, never at the copy you cloned.
+    Results are written to Bootstrap-HWiNFO-AutoUpdate.log next to this script before
+    elevation and to the protected copy after elevation.
 
     The non-elevated parent tries to wait for the elevated process so its exit
     code reflects the real result. If the wait is not permitted (a common Windows
@@ -34,6 +39,15 @@
     project's script as its -File argument. Windows can reuse a PID between that
     check and termination, so pass only freshly observed, trusted PIDs.
 
+.PARAMETER DeployRoot
+    Protected installation directory for the scripts. Defaults to
+    %ProgramData%\HWiNFO-AutoUpdate and must stay there.
+
+.PARAMETER ForceRedeploy
+    Allow a redeploy from a user-writable copy when a protected deployment already
+    exists. Normally, after the first deployment, run Bootstrap from the protected
+    copy itself.
+
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File .\Bootstrap-HWiNFO-AutoUpdate.ps1
 
@@ -45,7 +59,9 @@ param(
     [string] $TaskName = 'HWiNFO-AutoUpdate',
     [string] $TaskTime = '09:00',
     [string] $InstallerPath,
-    [int[]] $StalePids = @()
+    [int[]] $StalePids = @(),
+    [string] $DeployRoot = (Join-Path $env:ProgramData 'HWiNFO-AutoUpdate'),
+    [switch] $ForceRedeploy
 )
 
 $ErrorActionPreference = 'Stop'
@@ -55,6 +71,7 @@ $updateFile = Join-Path $root 'Update-HWiNFO.ps1'
 $logFile    = Join-Path $root 'Bootstrap-HWiNFO-AutoUpdate.log'
 
 . (Join-Path $root 'lib\HWiNFO.Core.ps1')
+. (Join-Path $root 'lib\HWiNFO.Deploy.ps1')
 
 function Write-BootstrapLog {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Console output for interactive and scheduled runs; every line is also written to the log file.')]
@@ -84,6 +101,10 @@ foreach ($stalePid in $StalePids) {
         $validationErrors += "StalePids must contain positive process IDs; got $stalePid."
     }
 }
+$expectedRoot = Join-Path $env:ProgramData 'HWiNFO-AutoUpdate'
+if ([IO.Path]::GetFullPath($DeployRoot) -ne [IO.Path]::GetFullPath($expectedRoot)) {
+    $validationErrors += "DeployRoot must be $expectedRoot; got $DeployRoot."
+}
 if ($validationErrors.Count -gt 0) {
     foreach ($validationError in $validationErrors) {
         Write-BootstrapLog "Validation error: $validationError"
@@ -94,9 +115,12 @@ if ($validationErrors.Count -gt 0) {
 # ---------------------------------------------------------------- self-elevation
 if (-not (Test-IsElevated)) {
     Write-BootstrapLog 'Not running as administrator; requesting elevation (approve the UAC prompt)...'
-    $staleArg = if ($StalePids.Count) { '-StalePids ' + ($StalePids -join ',') } else { '' }
-    $instArg  = if ($InstallerPath)   { '-InstallerPath "{0}"' -f $InstallerPath } else { '' }
-    $argList  = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -TaskName "{1}" -TaskTime "{2}" {3} {4}' -f $PSCommandPath, $TaskName, $TaskTime, $instArg, $staleArg
+    $staleArg  = if ($StalePids.Count) { '-StalePids ' + ($StalePids -join ',') } else { '' }
+    $instArg   = if ($InstallerPath)   { '-InstallerPath "{0}"' -f $InstallerPath } else { '' }
+    $deployArg = '-DeployRoot "{0}"' -f $DeployRoot
+    $forceArg  = if ($ForceRedeploy) { '-ForceRedeploy' } else { '' }
+    $argList   = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -TaskName "{1}" -TaskTime "{2}" {3} {4} {5} {6}' -f `
+        $PSCommandPath, $TaskName, $TaskTime, $instArg, $staleArg, $deployArg, $forceArg
     try {
         $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -Verb RunAs -PassThru
     } catch {
@@ -117,6 +141,21 @@ if (-not (Test-IsElevated)) {
 
 Write-BootstrapLog 'Running with administrator privileges.'
 
+# ---------------------------------------------------------------- deploy protected copy
+try {
+    Install-ProtectedDeployment -SourceRoot $root -DeployRoot $DeployRoot -Force:$ForceRedeploy
+    $deployedUpdate    = Join-Path $DeployRoot 'Update-HWiNFO.ps1'
+    $deployedBootstrap = Join-Path $DeployRoot 'Bootstrap-HWiNFO-AutoUpdate.ps1'
+    $updateFile = $deployedUpdate
+    $logFile    = Join-Path $DeployRoot 'Bootstrap-HWiNFO-AutoUpdate.log'
+    $acl = Get-Acl -LiteralPath $DeployRoot
+    Write-BootstrapLog "Protected deployment ready: $DeployRoot (owner: $($acl.Owner))."
+    Write-BootstrapLog "Future runs should use $deployedBootstrap; the cloned copy is only a deployment package."
+} catch {
+    Write-BootstrapLog "Failed to deploy protected copy: $($_.Exception.Message)"
+    exit 1
+}
+
 # ---------------------------------------------------------------- stale process cleanup
 foreach ($pidToStop in $StalePids) {
     if ($pidToStop -eq $PID) { continue }
@@ -134,7 +173,7 @@ foreach ($pidToStop in $StalePids) {
     $isExpected  = Test-StaleProcessMatch `
         -ProcessName $processName `
         -CommandLine $target.CommandLine `
-        -ExpectedPaths @($updateFile, $PSCommandPath)
+        -ExpectedPaths @($updateFile, $PSCommandPath, $deployedBootstrap)
 
     if (-not $isExpected) {
         Write-BootstrapLog "Refusing to stop PID=$($pidToStop): $($target.Name) is not a leftover run of this project's scripts. Re-check the PID before trying again."
@@ -166,9 +205,11 @@ if ($updateExit -eq 0) {
 # ---------------------------------------------------------------- 2. scheduled task
 $taskRegistered = $false
 try {
+    $powershellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $action = New-ScheduledTaskAction `
-        -Execute 'powershell.exe' `
-        -Argument ('-NoProfile -ExecutionPolicy Bypass -NonInteractive -File "{0}"' -f $updateFile)
+        -Execute $powershellExe `
+        -Argument ('-NoProfile -ExecutionPolicy Bypass -NonInteractive -WindowStyle Hidden -File "{0}"' -f $updateFile) `
+        -WorkingDirectory $DeployRoot
     $trigger = New-ScheduledTaskTrigger -Daily -At $TaskTime
     $settings = New-ScheduledTaskSettingsSet `
         -ExecutionTimeLimit (New-TimeSpan -Minutes 15) `
@@ -184,7 +225,9 @@ try {
         -Force | Out-Null
 
     $task = Get-ScheduledTask -TaskName $TaskName
-    Write-BootstrapLog "Scheduled task registered: $TaskName (state: $($task.State), daily at $TaskTime, highest privileges)"
+    $principal = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    Write-BootstrapLog "Scheduled task registered: $TaskName (state: $($task.State), daily at $TaskTime, highest privileges, principal: $principal)"
+    Write-BootstrapLog "Task action: $powershellExe -File $updateFile"
     $taskRegistered = $true
 } catch {
     Write-BootstrapLog "Failed to register the scheduled task: $($_.Exception.Message)"
