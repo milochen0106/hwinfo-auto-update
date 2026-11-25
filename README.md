@@ -73,12 +73,27 @@ flowchart TD
 
 ## Requirements
 
-- Windows 10 / Windows 11 (x64 or ARM64; the script targets `HWiNFO64.EXE`).
-- Windows PowerShell 5.1 or newer (the scripts are compatible with PowerShell 7 as well).
-- Administrator rights **at upgrade time** — the installer writes to `C:\Program Files\HWiNFO64`.
-- Internet access to `www.hwinfo.com` (RSS, download page, installer) and, for the primary path, the Windows Package Manager source used by winget.
-- `winget` (App Installer) is recommended but optional; without it the script falls back to the direct download path.
-- `curl.exe` (built into Windows 10/11) is recommended for the fallback path.
+### No plugins or PowerShell modules are needed
+
+Both scripts use **only built-in Windows PowerShell cmdlets**. There is nothing to install from the PowerShell Gallery, no NuGet provider, no third-party module, no agent, and no background service. A clean Windows 10/11 machine with HWiNFO already installed is enough.
+
+The commands in this README also pass `-ExecutionPolicy Bypass`, so a machine with the default `Restricted` execution policy does not need any system-wide policy change.
+
+### Tool and condition matrix
+
+| Requirement | Built into Windows? | Needed for | If missing |
+| --- | --- | --- | --- |
+| Windows 10 / Windows 11 (x64 or ARM64) | The OS itself | Everything | Unsupported. The scripts target `HWiNFO64.EXE` and rely on APIs/cmdlets present in Windows 10+. |
+| Windows PowerShell 5.1+ (`powershell.exe`) | Yes — ships with Windows | Running the scripts | Cannot run. PowerShell 7 (`pwsh`) also works but is not required. |
+| .NET Framework (PowerShell runtime dependency) | Yes — ships with Windows | XML parsing, TLS 1.2 | Implicit — covered by the PowerShell requirement. |
+| HWiNFO 64 installed with the official Inno Setup installer | No — it is the application being updated | Version detection, backup, upgrade | The script exits with `Cannot locate HWiNFO64.EXE`. Use `-InstallDir` for a non-standard location. |
+| Administrator rights | No — granted through UAC | Writing to Program Files, registering a highest-privilege task | `-CheckOnly` still works; the actual upgrade and bootstrap will fail. |
+| Internet access to `www.hwinfo.com` | Yes — network connectivity | RSS feed, download page, installer | No version check is possible. |
+| `winget` (App Installer) | Usually yes on Windows 10 1809+ / Windows 11, but can be removed | **Preferred** upgrade path — validates the publisher SHA-256 | Optional: the script falls back to a direct download. |
+| `curl.exe` | Yes on Windows 10 1809+ / Windows 11 (`C:\Windows\System32\curl.exe`) | Fast fallback download from the official CDN | Optional: falls back to `Invoke-WebRequest`, which may receive `403` from the vendor CDN. |
+| Windows Task Scheduler (`Register-ScheduledTask`) | Yes — built in | Daily automation via the bootstrap | Manual runs still work; only the automatic schedule is unavailable. |
+
+In short: on a typical Windows 11 machine, the **only** things you need to provide are HWiNFO itself, an administrator approval at upgrade time, and internet access. Everything else is already present.
 
 ## Installation
 
@@ -238,6 +253,7 @@ Scheduled Task Scheduler reports `0x41303` (`267011`, "task has not yet run") be
 - The winget path validates the installer hash against the publisher-provided SHA-256 before installation.
 - The direct-download path **logs** the SHA-256 of the downloaded file but does not pin a known-good value. winget is therefore the preferred path; use `-InstallerPath` only with installers you obtained from `https://www.hwinfo.com/download/`.
 - The scripts store no credentials, tokens, or personally identifiable configuration; they only read public HTTPS endpoints and local installation metadata.
+- Git commit metadata for this repository uses a GitHub noreply address; no personal email address is exposed in the public history.
 - UAC elevation is requested explicitly by the bootstrap. Review the script before approving elevation on a new machine.
 
 ## Limitations

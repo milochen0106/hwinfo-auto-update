@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-11-25
+
+### Changed
+
+- Git commit metadata now uses the GitHub noreply address instead of a personal email address; the public history was rewritten accordingly.
+- `README.md` now explicitly documents that no PowerShell modules or plugins are required, and includes a tool/condition matrix describing built-in versus optional prerequisites.
+
 ## [1.0.0] - 2026-11-25
 
 ### Added
