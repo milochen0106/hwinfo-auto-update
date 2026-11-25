@@ -21,6 +21,7 @@ It was written for machines where HWiNFO was installed with the official Inno Se
 - [Files and paths](#files-and-paths)
 - [Logging and backups](#logging-and-backups)
 - [Exit codes](#exit-codes)
+- [Development and tests](#development-and-tests)
 - [Troubleshooting](#troubleshooting)
 - [Security considerations](#security-considerations)
 - [Limitations](#limitations)
@@ -42,9 +43,9 @@ It deliberately reacts to **stable** announcements only. Beta and release-candid
 | Official update signal | Parses `https://www.hwinfo.com/news.xml/`; selects `HWiNFO vX.YY released`, excludes `Beta`, `RC`, `pre-release`. |
 | Local version detection | Reads `HWiNFO64.EXE` `ProductVersion` (e.g. `8.52-6060` → `8.52`); install directory is detected from the Windows uninstall registry, with a Program Files fallback and a `-InstallDir` override. |
 | Settings preservation | Backs up `HWiNFO64.INI` with a timestamp before every upgrade. |
-| Silent upgrade | Primary path: `winget install --exact --force --silent` (winget verifies the publisher SHA-256). Fallback: direct download of the official installer + `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`. |
+| Silent upgrade | Primary path: `winget install --exact --force --silent` (winget verifies the publisher SHA-256). Fallback: direct download of the official installer + `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`, gated on a valid Authenticode signature from `REALiX, s.r.o.`. |
 | Verification | Re-reads the installed version after the installer exits and fails the run if it did not reach the announced version. |
-| Process handling | Stops running `HWiNFO64` before the upgrade (Inno Setup cannot replace files in use) and restarts it afterwards if it was running. |
+| Process handling | Stops running `HWiNFO64` before the upgrade and waits for the process to actually exit (Inno Setup cannot replace files in use), then restarts it afterwards if it was running — including when the upgrade failed. |
 | Dry run | `-CheckOnly` reports the comparison and makes no changes. |
 | Auditability | Every step is appended to a local log file. |
 
@@ -187,7 +188,8 @@ Unregister-ScheduledTask -TaskName 'HWiNFO-AutoUpdate' -Confirm:$false
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
 | `-CheckOnly` | switch | off | Compare versions and exit without modifying the system. |
-| `-Force` | switch | off | Run the upgrade even if the installed version is equal or newer. |
+| `-Force` | switch | off | Reinstall even when the installed version already equals the announced version. Never downgrades. |
+| `-AllowDowngrade` | switch | off | Explicitly permit installing an older version than the one currently installed. Without it, a locally newer build is left untouched. |
 | `-NoRestore` | switch | off | Do not restart HWiNFO after the upgrade. |
 | `-InstallerPath` | string | none | Use a pre-downloaded installer instead of winget / network download. |
 | `-InstallDir` | string | auto-detected | Override the HWiNFO installation directory. |
@@ -200,9 +202,9 @@ Unregister-ScheduledTask -TaskName 'HWiNFO-AutoUpdate' -Confirm:$false
 | `-TaskName` | string | `HWiNFO-AutoUpdate` | Scheduled task name. |
 | `-TaskTime` | string | `09:00` | Daily run time (`HH:mm`). |
 | `-InstallerPath` | string | none | Passed through to `Update-HWiNFO.ps1`. |
-| `-StalePids` | int[] | none | Process IDs of a previous stuck update to terminate before upgrading. |
+| `-StalePids` | int[] | none | Process IDs of a previous stuck update to terminate before upgrading. Only the listed PIDs are touched. |
 
-Note: when passing an array from `powershell -Command`, use `-StalePids @(1234,5678)`; `-StalePids 1234,5678` is parsed as a single string by PowerShell's command-line binding.
+Note: when passing an array from `powershell -Command`, use `-StalePids @(1234,5678)`; `-StalePids 1234,5678` is parsed as a single string by PowerShell's command-line binding. `-TaskName` must be a valid task name (no `\ / : * ? " < > |`) and `-TaskTime` must be `HH:mm` in 24-hour form; both are validated before elevation, so a typo never leaves a half-configured task behind.
 
 ## Files and paths
 
@@ -210,6 +212,9 @@ Note: when passing an array from `powershell -Command`, use `-StalePids @(1234,5
 | --- | --- | --- |
 | `Update-HWiNFO.ps1` | repository root | Version check and upgrade logic. |
 | `Bootstrap-HWiNFO-AutoUpdate.ps1` | repository root | Elevation + task registration. |
+| `lib/HWiNFO.Core.ps1` | `lib/` | Pure helper functions (version parsing, feed parsing, PE check, signature check, input validation). Dot-sourced by both scripts and by the tests. |
+| `tests/HWiNFO.Core.Tests.ps1` | `tests/` | Pester tests for the helpers; no network and no installation. |
+| `.github/workflows/tests.yml` | `.github/` | CI: Pester + PSScriptAnalyzer on `windows-latest`. |
 | `Update-HWiNFO.log` | repository root | Append-only run log. |
 | `Bootstrap-HWiNFO-AutoUpdate.log` | repository root | One-time setup log. |
 | `HWiNFO-Backups/` | repository root | Timestamped `HWiNFO64.INI` backups. |
@@ -234,7 +239,21 @@ Levels: `INFO`, `WARN`, `ERROR`. An update backs up `HWiNFO64.INI` as `HWiNFO64.
 | `0` | Up to date, dry-run comparison completed, or upgrade verified successfully. |
 | `1` | Failure: version feed unreachable, install directory not found, download/install failed, or post-install verification failed. |
 
+`Bootstrap-HWiNFO-AutoUpdate.ps1` returns the update exit code and additionally returns `1` when input validation or scheduled-task registration fails. The non-elevated parent waits for the elevated child and propagates its exit code; only when Windows forbids that wait does it exit `0` and point to `Bootstrap-HWiNFO-AutoUpdate.log` for the final result.
+
 Scheduled Task Scheduler reports `0x41303` (`267011`, "task has not yet run") before the first execution — this is normal.
+
+## Development and tests
+
+```powershell
+# Pester 5+ (Pester 3.4, bundled with Windows, is not supported)
+Install-Module Pester -MinimumVersion 5.5.0 -Force -Scope CurrentUser
+Invoke-Pester -Path ./tests -Output Detailed
+```
+
+The suite is deliberately pure: it uses XML fixtures and Windows-signed binaries, so it never installs HWiNFO, never touches the network, and runs unprivileged. CI (`.github/workflows/tests.yml`) runs the same tests plus PSScriptAnalyzer with error severity on every push and pull request.
+
+There are no tests that perform a real upgrade; that step is verified manually with `-CheckOnly` and by reading the log.
 
 ## Troubleshooting
 
@@ -247,16 +266,26 @@ Scheduled Task Scheduler reports `0x41303` (`267011`, "task has not yet run") be
 | `Access denied` on `Wait-Process` / `Stop-Process` | A non-elevated process cannot control an elevated one. | Perform the cleanup from the elevated bootstrap (`-StalePids`). |
 | A new Beta appears but nothing is installed | By design — Beta / RC announcements are filtered out. | Wait for the stable announcement, or edit `Get-LatestStableVersion` if you intentionally want pre-releases. |
 | HWiNFO window disappears briefly | The script stops it so Inno Setup can replace files, then restarts it. | Use `-NoRestore` if you prefer to restart it yourself. |
+| `Unexpected signer: ...` or `Authenticode signature is not valid` | The installer is not signed by REALiX (proxy / mirror HTML page / tampered file). | Download the installer again from `https://www.hwinfo.com/download/`; do not bypass the check. |
+| Update runs even though the local build looks newer | The feed only advertises `major.minor`; build numbers are not compared. | Leave `-AllowDowngrade` unset — the script then refuses to downgrade. |
+| The elevated bootstrap exits `0` but nothing happened | Windows blocked the parent from waiting on the higher-integrity child. | Read `Bootstrap-HWiNFO-AutoUpdate.log`. |
 | First scheduled run shows `267011` | Task has not run yet. | Nothing to do; check after the first scheduled time. |
 
 ## Security considerations
 
 - Version information comes only from the vendor's RSS feed; installers come from the vendor's download page or from the winget manifest that the vendor publishes.
 - The winget path validates the installer hash against the publisher-provided SHA-256 before installation.
-- The direct-download path **logs** the SHA-256 of the downloaded file but does not pin a known-good value. winget is therefore the preferred path; use `-InstallerPath` only with installers you obtained from `https://www.hwinfo.com/download/`.
+- The direct-download path validates the file before running it:
+  1. DOS `MZ` header present (rejects HTML error pages and truncated downloads);
+  2. Authenticode signature status is `Valid`;
+  3. the signer certificate subject contains `REALiX` (the HWiNFO vendor) — a valid signature from any other publisher is rejected.
+  The SHA-256 is then logged for your own auditing, but it is not pinned, so a vendor re-signing with the same publisher is accepted automatically.
+- `-InstallerPath` runs the same three checks, so a tampered file is rejected before execution.
 - The scripts store no credentials, tokens, or personally identifiable configuration; they only read public HTTPS endpoints and local installation metadata.
 - Git commit metadata for this repository uses a GitHub noreply address; no personal email address is exposed in the public history.
 - UAC elevation is requested explicitly by the bootstrap. Review the script before approving elevation on a new machine.
+
+What this does **not** protect against: a compromised vendor feed or a stolen vendor code-signing certificate. Both an RSS hijack and a signed malicious installer would pass these checks, because the trust anchor is the vendor itself.
 
 ## Limitations
 

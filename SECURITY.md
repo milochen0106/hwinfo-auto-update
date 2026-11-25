@@ -4,7 +4,19 @@
 
 | Version | Supported |
 | --- | --- |
-| 1.0.x | Yes |
+| 1.1.x | Yes |
+| 1.0.x | No (superseded by 1.1.0) |
+
+## Security model
+
+The trust anchor is the vendor, REALiX s.r.o.:
+
+- **Version signal**: the official RSS feed at `https://www.hwinfo.com/news.xml/`.
+- **winget path**: the installer hash is verified by winget against the vendor's manifest.
+- **Direct-download path**: the file must have a DOS `MZ` header, a `Valid` Authenticode signature, and a signer subject containing `REALiX`. The SHA-256 is logged for auditing but not pinned.
+- **`-InstallerPath`**: the same three checks run before execution.
+
+Explicitly out of scope for these checks: a compromised vendor feed, or a leaked vendor code-signing key. Both would produce input that passes every check, because the vendor is the only trusted party.
 
 ## Reporting a vulnerability
 
@@ -24,8 +36,8 @@ issue publicly until a fix has been released or the report has been declined.
 
 In scope:
 
-- The two PowerShell scripts in this repository.
-- The documentation's security claims (update sources, hash verification, elevation behavior).
+- The two PowerShell scripts in this repository and `lib/HWiNFO.Core.ps1`.
+- The documentation's security claims (update sources, signature verification, hash logging, elevation behavior).
 
 Out of scope:
 

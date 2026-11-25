@@ -48,10 +48,10 @@ HWiNFO 內建的「自動更新」功能是 **Pro 版專屬**。若你使用的�
 | 抓取官方通知 | 解析 RSS，篩掉 Beta / RC / pre-release，取最高穩定版 |
 | 比對版本 | 官方版較新才動作；`-CheckOnly` 只回報不異動 |
 | 備份設定 | 更新前將 `HWiNFO64.INI` 另存為時間戳檔名 |
-| 關閉程式 | 停止執行中的 `HWiNFO64`（Inno Setup 無法覆蓋使用中的檔案） |
-| 執行更新 | 優先 winget（含 SHA-256 驗證）；失敗時改為 curl 下載官方安裝檔並靜默安裝 |
+| 關閉程式 | 停止執行中的 `HWiNFO64`，並用 `Wait-Process` 確認真的結束 |
+| 執行更新 | 優先 winget（含 SHA-256 驗證）；失敗時改為 curl 下載官方安裝檔，先驗 Authenticode 簽章與簽署者（`REALiX, s.r.o.`）再靜默安裝 |
 | 驗證結果 | 重新讀取版本；未達目標版本即判定失敗 |
-| 還原狀態 | 若更新前 HWiNFO 正在執行，更新後自動重新啟動 |
+| 還原狀態 | 若更新前 HWiNFO 正在執行，**即使更新失敗**也會在 `finally` 中重新啟動 |
 | 留下紀錄 | 每一步都寫入 `Update-HWiNFO.log` |
 
 ---
@@ -175,9 +175,10 @@ flowchart TD
 | 參數 | 型別 | 預設 | 說明 |
 |---|---|---|---|
 | `-CheckOnly` | switch | 關 | 只比對版本，不下載、不安裝 |
-| `-Force` | switch | 關 | 即使版本相同或更新仍強制重裝 |
+| `-Force` | switch | 關 | 版本已相同時仍重裝（修復用）。**不會**降版 |
+| `-AllowDowngrade` | switch | 關 | 明確允許安裝比目前更舊的版本；未指定時本機版本較新就跳過 |
 | `-NoRestore` | switch | 關 | 更新後不重新啟動 HWiNFO |
-| `-InstallerPath` | string | 無 | 使用預先下載的安裝檔 |
+| `-InstallerPath` | string | 無 | 使用預先下載的安裝檔（同樣驗簽章） |
 | `-InstallDir` | string | 自動偵測 | 覆寫 HWiNFO 安裝目錄 |
 | `-LogPath` | string | `<腳本目錄>\Update-HWiNFO.log` | 日誌位置 |
 
@@ -191,6 +192,7 @@ flowchart TD
 | `-StalePids` | int[] | 無 | 更新前先終止的舊行程 PID |
 
 > 從 `powershell -Command` 傳陣列請用 `-StalePids @(1234,5678)`；寫成 `-StalePids 1234,5678` 會被當成單一字串。
+> `-TaskName` 不得含 `\ / : * ? " < > |`，`-TaskTime` 必須是 24 小時制 `HH:mm`；兩者都在提權**前**驗證，打錯不會留下半套設定。
 
 ---
 
@@ -224,6 +226,9 @@ Unregister-ScheduledTask -TaskName 'HWiNFO-AutoUpdate' -Confirm:$false
 |---|---|---|
 | `Update-HWiNFO.ps1` | repo 根目錄 | 版本檢查與更新主程式 |
 | `Bootstrap-HWiNFO-AutoUpdate.ps1` | repo 根目錄 | 提升權限與註冊排程 |
+| `lib/HWiNFO.Core.ps1` | `lib/` | 純函式（版本解析、RSS 解析、PE 檢查、簽章檢查、參數驗證），由兩支腳本與測試共用 |
+| `tests/HWiNFO.Core.Tests.ps1` | `tests/` | Pester 測試；不連網、不安裝 |
+| `.github/workflows/tests.yml` | `.github/` | CI：在 `windows-latest` 跑 Pester 與 PSScriptAnalyzer |
 | `Update-HWiNFO.log` | repo 根目錄 | 追加式執行紀錄 |
 | `Bootstrap-HWiNFO-AutoUpdate.log` | repo 根目錄 | 一次性安裝紀錄 |
 | `HWiNFO-Backups/` | repo 根目錄 | 時間戳記的 `HWiNFO64.INI` 備份 |
@@ -244,7 +249,21 @@ yyyy-MM-dd HH:mm:ss [LEVEL] message
 | `0` | 已是最新、dry-run 完成，或更新後驗證成功 |
 | `1` | 失敗：無法取得版本通知、找不到安裝目錄、下載／安裝失敗、更新後驗證失敗 |
 
+Bootstrap 會轉回更新程式的結束碼；參數驗證失敗或排程註冊失敗時另外回 `1`。未提權的父行程會等待提權後的子行程並轉回其結束碼；只有在 Windows 不允許跨完整性層級等待時才會回 `0`，此時請看 `Bootstrap-HWiNFO-AutoUpdate.log` 的最終結果。
+
 工作排程器在首次執行前顯示 `0x41303`（`267011`，「工作尚未執行」）是正常現象。
+
+### 測試與 CI
+
+```powershell
+# 需要 Pester 5 以上（Windows 內建的 3.4 不支援）
+Install-Module Pester -MinimumVersion 5.5.0 -Force -Scope CurrentUser
+Invoke-Pester -Path ./tests -Output Detailed
+```
+
+測試刻意保持「純函式」：使用 XML fixture 與 Windows 內建的簽章檔案，因此不連網、不安裝 HWiNFO，也不需要系統管理員權限。CI（`.github/workflows/tests.yml`）在每次 push 與 PR 執行同一套測試，並以 error 等級跑 PSScriptAnalyzer。
+
+目前沒有會真正執行升級的自動化測試；那一步仍以 `-CheckOnly` 加人工檢視日誌驗證。
 
 ---
 
@@ -259,6 +278,8 @@ yyyy-MM-dd HH:mm:ss [LEVEL] message
 | `Access denied`（`Wait-Process`／`Stop-Process`） | 非提升行程不能控制提升行程 | 從提升後的 Bootstrap 用 `-StalePids` 清理 |
 | 出現 Beta 但沒安裝 | 設計如此，Beta／RC 被篩掉 | 等正式版；若確定要預發布，需修改 `Get-LatestStableVersion` |
 | HWiNFO 短暫消失 | 更新前會關閉它，完成後再開 | 不希望自動開就用 `-NoRestore` |
+| `Unexpected signer: ...` 或 `Authenticode signature is not valid` | 安裝檔不是 REALiX 簽章（代理頁面、鏡像 HTML、被竄改） | 重新從 `https://www.hwinfo.com/download/` 下載；不要繞過檢查 |
+| Bootstrap 回 `0` 但什麼都沒發生 | Windows 擋住跨完整性層級的等待 | 看 `Bootstrap-HWiNFO-AutoUpdate.log` 的最終結果 |
 | 首次排程顯示 `267011` | 尚未到執行時間 | 無須處理 |
 
 ---
@@ -270,9 +291,12 @@ yyyy-MM-dd HH:mm:ss [LEVEL] message
 - **檔案內容**：無個人 email、本機帳號路徑、token、API key 或密碼；`README.md` 中的 `C:\Users\<you>` 是佔位符，不是實際路徑。
 - **Git commit metadata**：已全面改用 `milochen0106@users.noreply.github.com`，不再暴露個人 Gmail。
 - **來源限制**：版本資訊只取自官方 RSS；安裝檔只來自官方下載頁或 winget manifest。
-- **雜湊驗證**：winget 路徑會以發行者提供的 SHA-256 驗證安裝檔；直接下載路徑**只記錄** SHA-256、未 pin 固定值，因此仍建議優先使用 winget，或只搭配你自己從官方下載頁取得的安裝檔。
+- **雜湊驗證**：winget 路徑會以發行者提供的 SHA-256 驗證安裝檔。直接下載路徑在執行前做三項檢查：(1) DOS `MZ` 標頭存在（擋掉 HTML 錯誤頁與截斷檔）；(2) Authenticode 簽章狀態為 `Valid`；(3) 簽署者主體包含 `REALiX`（HWiNFO 發行者）。任何其他發行者的「有效簽章」一樣會被拒絕。SHA-256 仍會寫入日誌供你自行稽核，但不 pin 固定值，因此官方重新簽章時可自動通過。
+- **`-InstallerPath` 同樣驗證**：你提供的安裝檔也要通過上述三項檢查，被掉包或損毀的檔案不會被執行。
 - **無憑證儲存**：腳本不保存任何憑證、token 或個人化設定，只讀取公開 HTTPS 端點與本機安裝資訊。
 - **權限透明**：提升權限由 Bootstrap 明確觸發 UAC；在新的電腦上請先審視腳本再按「是」。
+
+> 這套檢查**無法**防禦：官方 RSS 被入侵，或官方簽章程式碼簽章憑證被竊。因為信任錨點就是官方本身，RSS 被改寫或官方簽出的惡意安裝檔都會通過驗證。
 
 > 補充說明：force push 已把舊 commit 從分支歷史移除，但 GitHub 短期內仍可能透過舊 SHA 直接存取該物件；若要求澈底清除，需向 GitHub Support 提出請求。
 

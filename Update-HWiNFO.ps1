@@ -8,17 +8,23 @@
        stable release. Beta / RC / pre-release announcements are intentionally ignored.
     3. When a newer stable version is available:
        - Backs up HWiNFO64.INI (preserves user settings).
-       - Stops any running HWiNFO64 process.
+       - Stops any running HWiNFO64 process and waits until it has actually exited.
        - Upgrades via winget (installer hash verified by winget), with a fallback to
-         a direct download of the official installer.
-       - Verifies the resulting version and optionally restarts HWiNFO.
+         a direct download of the official installer. The fallback validates the PE
+         header and the Authenticode signature (status and signer subject).
+       - Verifies the resulting version.
+       - Restarts HWiNFO if it was running before, even when the update failed.
     4. Writes every step to a log file.
 
 .PARAMETER CheckOnly
     Report the version comparison only; do not download or install anything.
 
 .PARAMETER Force
-    Reinstall even when the installed version is equal or newer (repair scenario).
+    Reinstall even when the installed version equals the announced version.
+    Force never downgrades; use -AllowDowngrade for that.
+
+.PARAMETER AllowDowngrade
+    Explicitly allow installing an older version than the one currently installed.
 
 .PARAMETER NoRestore
     Do not restart HWiNFO after the update, even if it was running before.
@@ -39,6 +45,9 @@
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File .\Update-HWiNFO.ps1
 
+.EXAMPLE
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\Update-HWiNFO.ps1 -Force
+
 .NOTES
     Requires administrator rights to write to Program Files. When scheduled, use
     "Run with highest privileges" (see Bootstrap-HWiNFO-AutoUpdate.ps1).
@@ -47,6 +56,7 @@
 param(
     [switch] $CheckOnly,
     [switch] $Force,
+    [switch] $AllowDowngrade,
     [switch] $NoRestore,
     [string] $InstallerPath,
     [string] $InstallDir,
@@ -61,6 +71,8 @@ if (-not $LogPath) {
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
+. (Join-Path $PSScriptRoot 'lib\HWiNFO.Core.ps1')
+
 # ---------------------------------------------------------------- constants
 $RssUrl      = 'https://www.hwinfo.com/news.xml/'
 $DownloadUrl = 'https://www.hwinfo.com/download/'
@@ -69,7 +81,8 @@ $TempRoot    = Join-Path $env:TEMP 'HWiNFO-AutoUpdate'
 $BackupRoot  = Join-Path $PSScriptRoot 'HWiNFO-Backups'
 
 # ---------------------------------------------------------------- logging
-function Write-Log {
+function Write-UpdateLog {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Console output for interactive and scheduled runs; every line is also written to the log file.')]
     param(
         [Parameter(Mandatory)][string] $Message,
         [string] $Level = 'INFO'
@@ -83,12 +96,6 @@ function Write-Log {
     }
 }
 
-function ExitWithError {
-    param([string] $Message)
-    Write-Log $Message 'ERROR'
-    exit 1
-}
-
 # ---------------------------------------------------------------- path detection
 function Get-InstallDirectory {
     param([string] $Override)
@@ -97,7 +104,7 @@ function Get-InstallDirectory {
         if (Test-Path -LiteralPath (Join-Path $Override 'HWiNFO64.EXE')) {
             return $Override.TrimEnd('\')
         }
-        ExitWithError "InstallDir override does not contain HWiNFO64.EXE: $Override"
+        throw "InstallDir override does not contain HWiNFO64.EXE: $Override"
     }
 
     # 1) Windows uninstall registry (HWiNFO uses an Inno Setup uninstall entry)
@@ -125,7 +132,7 @@ function Get-InstallDirectory {
         }
     }
 
-    ExitWithError 'Cannot locate HWiNFO64.EXE. Use -InstallDir to specify the path.'
+    throw 'Cannot locate HWiNFO64.EXE. Use -InstallDir to specify the path.'
 }
 
 $resolvedInstallDir = Get-InstallDirectory -Override $InstallDir
@@ -135,17 +142,12 @@ $IniPath = Join-Path $resolvedInstallDir 'HWiNFO64.INI'
 # ---------------------------------------------------------------- version helpers
 function Get-LocalVersion {
     if (-not (Test-Path -LiteralPath $ExePath)) {
-        ExitWithError "HWiNFO executable not found: $ExePath"
+        throw "HWiNFO executable not found: $ExePath"
     }
     $vi  = (Get-Item -LiteralPath $ExePath).VersionInfo
     $raw = $vi.ProductVersion
     if ([string]::IsNullOrWhiteSpace($raw)) { $raw = $vi.FileVersion }
-
-    # 8.52-6060 -> 8.52
-    if ($raw -match '^(\d+\.\d+)') {
-        return [version] $Matches[1]
-    }
-    ExitWithError "Cannot parse installed version: $raw"
+    return ConvertTo-HWiNFOReleaseVersion -Value $raw
 }
 
 function Get-LatestStableVersion {
@@ -157,24 +159,9 @@ function Get-LatestStableVersion {
         } else {
             [string] $response.Content
         }
-        [xml] $feed = $content
-
-        $candidates = @()
-        foreach ($item in $feed.rss.channel.item) {
-            $title = [string] $item.title
-            # Stable announcement format: "HWiNFO v8.60 released".
-            # Exclude Beta / RC / pre-release announcements.
-            if ($title -match 'HWiNFO\s+v(\d+\.\d+)(?:-\d+)?\s+released' -and
-                $title -notmatch 'Beta|RC|pre.?release') {
-                $candidates += [version] $Matches[1]
-            }
-        }
-        if ($candidates.Count -eq 0) {
-            ExitWithError 'No stable release announcement found in the official RSS feed'
-        }
-        return ($candidates | Sort-Object -Descending | Select-Object -First 1)
+        return Get-LatestStableVersionFromXml -Xml $content
     } catch {
-        ExitWithError "Failed to read the official release feed: $($_.Exception.Message)"
+        throw "Failed to read the official release feed: $($_.Exception.Message)"
     }
 }
 
@@ -196,7 +183,7 @@ function Get-InstallerUrl {
             return 'https://www.hwinfo.com' + $Matches[1]
         }
     } catch {
-        Write-Log "Could not parse the download page, deriving the URL from the version: $($_.Exception.Message)" 'WARN'
+        Write-UpdateLog "Could not parse the download page, deriving the URL from the version: $($_.Exception.Message)" 'WARN'
     }
 
     # Fallback convention: 8.60 -> hwi64_860.exe, 8.52 -> hwi64_852.exe
@@ -209,11 +196,11 @@ function Invoke-WingetUpgrade {
     param([Parameter(Mandatory)][version] $Version)
 
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        Write-Log 'winget not found; skipping the winget path' 'WARN'
+        Write-UpdateLog 'winget not found; skipping the winget path' 'WARN'
         return $false
     }
 
-    Write-Log "Installing $WingetId $Version via winget (publisher hash verified by winget)"
+    Write-UpdateLog "Installing $WingetId $Version via winget (installer hash verified by winget against its manifest)"
     $wingetArgs = @(
         'install', '--id', $WingetId, '--exact',
         '--version', $Version.ToString(), '--force',
@@ -222,12 +209,12 @@ function Invoke-WingetUpgrade {
     )
     try {
         $output = & winget @wingetArgs 2>&1 | Out-String
-        Write-Log ("winget output:`n" + $output.Trim())
+        Write-UpdateLog ("winget output:`n" + $output.Trim())
         if ($LASTEXITCODE -eq 0) { return $true }
-        Write-Log "winget exited with code $LASTEXITCODE; falling back to direct download" 'WARN'
+        Write-UpdateLog "winget exited with code $LASTEXITCODE; falling back to direct download" 'WARN'
         return $false
     } catch {
-        Write-Log "winget failed: $($_.Exception.Message); falling back to direct download" 'WARN'
+        Write-UpdateLog "winget failed: $($_.Exception.Message); falling back to direct download" 'WARN'
         return $false
     }
 }
@@ -240,10 +227,10 @@ function Invoke-ManualUpgrade {
 
     if ($LocalInstaller) {
         if (-not (Test-Path -LiteralPath $LocalInstaller)) {
-            ExitWithError "Specified installer does not exist: $LocalInstaller"
+            throw "Specified installer does not exist: $LocalInstaller"
         }
         $installer = $LocalInstaller
-        Write-Log "Using specified installer: $installer"
+        Write-UpdateLog "Using specified installer: $installer"
     } else {
         $url = Get-InstallerUrl -Version $Version
         if (-not (Test-Path -LiteralPath $TempRoot)) {
@@ -251,16 +238,16 @@ function Invoke-ManualUpgrade {
         }
         $installer = Join-Path $TempRoot ("hwi64_{0}.exe" -f $Version.ToString().Replace('.', ''))
 
-        Write-Log "Downloading official installer: $url"
+        Write-UpdateLog "Downloading official installer: $url"
         # The official CDN rejects Invoke-WebRequest with 403 in some environments;
         # curl.exe with a browser UA works and is used first when available.
         if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
             & curl.exe -L --fail --silent --show-error --max-time 300 `
                 -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36' `
                 -e 'https://www.hwinfo.com/download/' `
-                -o $installer $url 2>&1 | ForEach-Object { Write-Log $_ }
+                -o $installer $url 2>&1 | ForEach-Object { Write-UpdateLog $_ }
             if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $installer)) {
-                Write-Log 'curl download failed; trying Invoke-WebRequest' 'WARN'
+                Write-UpdateLog 'curl download failed; trying Invoke-WebRequest' 'WARN'
             }
         }
         if (-not (Test-Path -LiteralPath $installer)) {
@@ -268,91 +255,140 @@ function Invoke-ManualUpgrade {
                 Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing `
                     -TimeoutSec 300 -Headers @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
             } catch {
-                ExitWithError "Failed to download the official installer: $($_.Exception.Message)"
+                throw "Failed to download the official installer: $($_.Exception.Message)"
             }
         }
     }
 
+    # Integrity gate: reject HTML error pages, truncated files, and installers
+    # that are not signed by the expected publisher.
+    if (-not (Test-PeFile -Path $installer)) {
+        throw "Downloaded file is not a valid Windows executable (PE/MZ header missing): $installer"
+    }
+    Test-TrustedInstaller -Path $installer | Out-Null
     $hash = (Get-FileHash -Path $installer -Algorithm SHA256).Hash
-    Write-Log "Installer SHA256: $hash"
-    Write-Log 'Running silent install (/VERYSILENT /SUPPRESSMSGBOXES /NORESTART)'
-    try {
-        $proc = Start-Process -FilePath $installer `
-            -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' `
-            -Wait -PassThru
-        Write-Log "Installer exit code: $($proc.ExitCode)"
-        if ($proc.ExitCode -ne 0) {
-            ExitWithError "Installer reported failure (exit code $($proc.ExitCode))"
-        }
-    } catch {
-        ExitWithError "Silent install failed: $($_.Exception.Message)"
+    Write-UpdateLog "Installer verified. SHA256: $hash"
+
+    Write-UpdateLog 'Running silent install (/VERYSILENT /SUPPRESSMSGBOXES /NORESTART)'
+    $proc = Start-Process -FilePath $installer `
+        -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' `
+        -Wait -PassThru
+    Write-UpdateLog "Installer exit code: $($proc.ExitCode)"
+    if ($proc.ExitCode -ne 0) {
+        throw "Installer reported failure (exit code $($proc.ExitCode))"
     }
 }
 
 # ---------------------------------------------------------------- main
-Write-Log '========== HWiNFO auto-update check started =========='
-Write-Log "Install directory: $resolvedInstallDir"
+Write-UpdateLog '========== HWiNFO auto-update check started =========='
+Write-UpdateLog "Install directory: $resolvedInstallDir"
 
-$localVersion = Get-LocalVersion
-Write-Log "Installed version: $localVersion"
+$updateError = $null
+$afterVersion = $null
+$wasRunning = $false
 
-$latestVersion = Get-LatestStableVersion
-Write-Log "Latest stable version: $latestVersion (source: $RssUrl)"
+try {
+    $localVersion = Get-LocalVersion
+    Write-UpdateLog "Installed version: $localVersion"
 
-$needUpdate = ($latestVersion -gt $localVersion) -or $Force
-if (-not $needUpdate) {
-    Write-Log 'Already up to date.'
-    Write-Log '========== Check completed =========='
-    exit 0
-}
-if ($CheckOnly) {
-    Write-Log "New version $latestVersion available (-CheckOnly; no changes made)." 'WARN'
-    Write-Log '========== Check completed =========='
-    exit 0
-}
+    $latestVersion = Get-LatestStableVersion
+    Write-UpdateLog "Latest stable version: $latestVersion (source: $RssUrl)"
 
-Write-Log "Updating: $localVersion -> $latestVersion"
+    if ($latestVersion -lt $localVersion -and -not $AllowDowngrade) {
+        Write-UpdateLog "Installed version $localVersion is newer than the feed announcement ($latestVersion). Skipping to avoid a downgrade; use -AllowDowngrade to override." 'WARN'
+        Write-UpdateLog '========== Check completed =========='
+        exit 0
+    }
 
-# Back up user settings before the installer touches the install directory.
-if (-not (Test-Path -LiteralPath $BackupRoot)) {
-    New-Item -ItemType Directory -Path $BackupRoot -Force | Out-Null
-}
-if (Test-Path -LiteralPath $IniPath) {
-    $backup = Join-Path $BackupRoot ('HWiNFO64.{0}.INI' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
-    Copy-Item -LiteralPath $IniPath -Destination $backup -Force
-    Write-Log "Backed up settings: $backup"
-}
+    $needUpdate = ($latestVersion -gt $localVersion) -or
+                  $Force -or
+                  ($AllowDowngrade -and $latestVersion -lt $localVersion)
 
-# Inno Setup cannot overwrite files that are in use.
-$wasRunning = @(Get-Process -Name HWiNFO64 -ErrorAction SilentlyContinue).Count -gt 0
-if ($wasRunning) {
-    Write-Log 'Stopping running HWiNFO64...'
-    Stop-Process -Name HWiNFO64 -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 2
-}
+    if (-not $needUpdate) {
+        Write-UpdateLog 'Already up to date.'
+        Write-UpdateLog '========== Check completed =========='
+        exit 0
+    }
+    if ($CheckOnly) {
+        Write-UpdateLog "New version $latestVersion available (-CheckOnly; no changes made)." 'WARN'
+        Write-UpdateLog '========== Check completed =========='
+        exit 0
+    }
 
-# Update order: explicit installer > winget > direct download
-if ($InstallerPath) {
-    Invoke-ManualUpgrade -Version $latestVersion -LocalInstaller $InstallerPath
-} else {
-    $updated = Invoke-WingetUpgrade -Version $latestVersion
-    if (-not $updated) {
-        Invoke-ManualUpgrade -Version $latestVersion
+    Write-UpdateLog "Updating: $localVersion -> $latestVersion"
+
+    # Back up user settings before the installer touches the install directory.
+    if (-not (Test-Path -LiteralPath $BackupRoot)) {
+        New-Item -ItemType Directory -Path $BackupRoot -Force | Out-Null
+    }
+    if (Test-Path -LiteralPath $IniPath) {
+        $backup = Join-Path $BackupRoot ('HWiNFO64.{0}.INI' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        Copy-Item -LiteralPath $IniPath -Destination $backup -Force
+        Write-UpdateLog "Backed up settings: $backup"
+    }
+
+    # Inno Setup cannot overwrite files that are in use.
+    $wasRunning = @(Get-Process -Name HWiNFO64 -ErrorAction SilentlyContinue).Count -gt 0
+    if ($wasRunning) {
+        Write-UpdateLog 'Stopping running HWiNFO64...'
+        Stop-Process -Name HWiNFO64 -Force -ErrorAction Stop
+        try {
+            Wait-Process -Name HWiNFO64 -Timeout 15 -ErrorAction Stop
+        } catch {
+            throw 'HWiNFO64 did not exit within 15 seconds; aborting to avoid a partial install'
+        }
+        Write-UpdateLog 'HWiNFO64 stopped.'
+    }
+
+    # Update order: explicit installer > winget > direct download
+    if ($InstallerPath) {
+        Invoke-ManualUpgrade -Version $latestVersion -LocalInstaller $InstallerPath
+    } else {
+        $updated = Invoke-WingetUpgrade -Version $latestVersion
+        if ($updated) {
+            # winget can report success without replacing the binary (for example when the
+            # installed package is not the one it manages). Verify before trusting it.
+            $probe = Get-LocalVersion
+            if ($probe -lt $latestVersion) {
+                Write-UpdateLog "winget reported success but the installed version is still $probe; falling back to direct download" 'WARN'
+                $updated = $false
+            }
+        }
+        if (-not $updated) {
+            Invoke-ManualUpgrade -Version $latestVersion
+        }
+    }
+
+    # Verify the result.
+    $afterVersion = Get-LocalVersion
+    Write-UpdateLog "Version after update: $afterVersion"
+    if ($AllowDowngrade) {
+        if ($afterVersion -ne $latestVersion) {
+            throw "Update verification failed: expected exactly $latestVersion, got $afterVersion"
+        }
+    } elseif ($afterVersion -lt $latestVersion) {
+        throw "Update verification failed: expected >= $latestVersion, got $afterVersion"
+    }
+} catch {
+    $updateError = $_
+    Write-UpdateLog "Update failed: $($_.Exception.Message)" 'ERROR'
+} finally {
+    # Always restore the previous run state, including on failure.
+    if ($wasRunning -and -not $NoRestore) {
+        try {
+            Write-UpdateLog 'Restarting HWiNFO...'
+            Start-Process -FilePath $ExePath -ErrorAction Stop
+        } catch {
+            Write-UpdateLog "Failed to restart HWiNFO: $($_.Exception.Message)" 'WARN'
+        }
     }
 }
 
-# Verify the result.
-$afterVersion = Get-LocalVersion
-Write-Log "Version after update: $afterVersion"
-if ($afterVersion -lt $latestVersion) {
-    ExitWithError "Update verification failed: expected >= $latestVersion, got $afterVersion"
+if ($updateError) {
+    Write-UpdateLog '========== Check completed with errors =========='
+    exit 1
 }
 
-if ($wasRunning -and -not $NoRestore) {
-    Write-Log 'Restarting HWiNFO...'
-    Start-Process -FilePath $ExePath
-}
-
-Write-Log "Update complete: $localVersion -> $afterVersion"
-Write-Log '========== Check completed =========='
+Write-UpdateLog "Update complete: $localVersion -> $afterVersion"
+Write-UpdateLog '========== Check completed =========='
 exit 0

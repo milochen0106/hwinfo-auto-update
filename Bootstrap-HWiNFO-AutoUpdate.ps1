@@ -12,6 +12,12 @@
       3. Registers the scheduled task HWiNFO-AutoUpdate (daily, highest privileges).
     Results are written to Bootstrap-HWiNFO-AutoUpdate.log next to this script.
 
+    The non-elevated parent tries to wait for the elevated process so its exit
+    code reflects the real result. If the wait is not permitted (a common Windows
+    restriction when a lower-integrity process waits on a higher-integrity one),
+    the parent reports the elevated PID and exits 0; the log then holds the final
+    result.
+
 .PARAMETER TaskName
     Name of the scheduled task. Default: HWiNFO-AutoUpdate.
 
@@ -23,6 +29,7 @@
 
 .PARAMETER StalePids
     Optional list of process IDs from a previous, stuck update run to terminate.
+    Only the listed PIDs are touched; unrelated winget processes are never stopped.
 
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File .\Bootstrap-HWiNFO-AutoUpdate.ps1
@@ -44,65 +51,101 @@ $root       = $PSScriptRoot
 $updateFile = Join-Path $root 'Update-HWiNFO.ps1'
 $logFile    = Join-Path $root 'Bootstrap-HWiNFO-AutoUpdate.log'
 
-function Log {
+. (Join-Path $root 'lib\HWiNFO.Core.ps1')
+
+function Write-BootstrapLog {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Console output for interactive and scheduled runs; every line is also written to the log file.')]
     param([string] $Message)
     $line = '{0} {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message
     Write-Host $line
     Add-Content -Path $logFile -Value $line -Encoding UTF8
 }
 
+# ---------------------------------------------------------------- input validation (before elevation)
+$validationErrors = @()
+if (-not (Test-ValidTaskName -Value $TaskName)) {
+    $validationErrors += "Invalid task name '$TaskName'. It must be non-empty, at most 200 characters, and must not contain \\ / : * ? `" < > |."
+}
+if (-not (Test-ValidTaskTime -Value $TaskTime)) {
+    $validationErrors += "Invalid task time '$TaskTime'. Use 24-hour HH:mm, for example 09:00 or 18:30."
+}
+if ($InstallerPath) {
+    if (-not (Test-Path -LiteralPath $InstallerPath)) {
+        $validationErrors += "InstallerPath does not exist: $InstallerPath"
+    } elseif ([IO.Path]::GetExtension($InstallerPath) -ne '.exe') {
+        $validationErrors += "InstallerPath must point to an .exe file: $InstallerPath"
+    }
+}
+foreach ($stalePid in $StalePids) {
+    if ($stalePid -le 0) {
+        $validationErrors += "StalePids must contain positive process IDs; got $stalePid."
+    }
+}
+if ($validationErrors.Count -gt 0) {
+    foreach ($validationError in $validationErrors) {
+        Write-BootstrapLog "Validation error: $validationError"
+    }
+    exit 1
+}
+
 # ---------------------------------------------------------------- self-elevation
-$identity  = [Security.Principal.WindowsIdentity]::GetCurrent()
-$principal = New-Object Security.Principal.WindowsPrincipal($identity)
-if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Log 'Not running as administrator; requesting elevation (approve the UAC prompt)...'
+if (-not (Test-IsElevated)) {
+    Write-BootstrapLog 'Not running as administrator; requesting elevation (approve the UAC prompt)...'
     $staleArg = if ($StalePids.Count) { '-StalePids ' + ($StalePids -join ',') } else { '' }
     $instArg  = if ($InstallerPath)   { '-InstallerPath "{0}"' -f $InstallerPath } else { '' }
     $argList  = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -TaskName "{1}" -TaskTime "{2}" {3} {4}' -f $PSCommandPath, $TaskName, $TaskTime, $instArg, $staleArg
     try {
         $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -Verb RunAs -PassThru
-        Log "Elevation requested, PID=$($proc.Id). Wait for the update to finish."
-        exit 0
     } catch {
-        Log "Elevation failed: $($_.Exception.Message)"
+        Write-BootstrapLog "Elevation failed: $($_.Exception.Message)"
         exit 1
+    }
+
+    Write-BootstrapLog "Elevation requested, PID=$($proc.Id)."
+    try {
+        $proc.WaitForExit()
+        Write-BootstrapLog "Elevated process exited with code $($proc.ExitCode)."
+        exit $proc.ExitCode
+    } catch {
+        Write-BootstrapLog "Cannot wait for the elevated process ($($_.Exception.Message)). Check $logFile for the final result."
+        exit 0
     }
 }
 
-Log 'Running with administrator privileges.'
+Write-BootstrapLog 'Running with administrator privileges.'
 
 # ---------------------------------------------------------------- stale process cleanup
 foreach ($pidToStop in $StalePids) {
+    if ($pidToStop -eq $PID) { continue }
+    $target = Get-Process -Id $pidToStop -ErrorAction SilentlyContinue
+    if (-not $target) {
+        Write-BootstrapLog "Stale process PID=$pidToStop is not running; nothing to stop."
+        continue
+    }
     try {
         Stop-Process -Id $pidToStop -Force -ErrorAction Stop
-        Log "Stopped stale process PID=$pidToStop"
+        Write-BootstrapLog "Stopped stale process PID=$pidToStop ($($target.ProcessName))."
     } catch {
-        Log "Could not stop PID=$pidToStop : $($_.Exception.Message)"
-    }
-}
-foreach ($proc in @(Get-Process -Name winget -ErrorAction SilentlyContinue)) {
-    try {
-        Stop-Process -Id $proc.Id -Force -ErrorAction Stop
-        Log "Stopped winget PID=$($proc.Id)"
-    } catch {
-        Log "Could not stop winget PID=$($proc.Id) : $($_.Exception.Message)"
+        Write-BootstrapLog "Could not stop PID=$pidToStop : $($_.Exception.Message)"
     }
 }
 
 # ---------------------------------------------------------------- 1. update
-Log 'Starting HWiNFO update...'
+Write-BootstrapLog 'Starting HWiNFO update...'
 $updateArgs = '-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $updateFile
 if ($InstallerPath) {
     $updateArgs += ' -InstallerPath "{0}"' -f $InstallerPath
 }
 $updateProc = Start-Process -FilePath 'powershell.exe' -ArgumentList $updateArgs -Wait -PassThru
 $updateExit = $updateProc.ExitCode
-Log "Update process exit code: $updateExit"
-if ($updateExit -ne 0) {
-    Log 'Update failed; still attempting to register the scheduled task so it can retry.'
+if ($updateExit -eq 0) {
+    Write-BootstrapLog 'Update succeeded.'
+} else {
+    Write-BootstrapLog "Update failed with exit code $updateExit. If update steps were interrupted, HWiNFO is restarted by Update-HWiNFO.ps1 when it was running before the update."
 }
 
 # ---------------------------------------------------------------- 2. scheduled task
+$taskRegistered = $false
 try {
     $action = New-ScheduledTaskAction `
         -Execute 'powershell.exe' `
@@ -122,10 +165,21 @@ try {
         -Force | Out-Null
 
     $task = Get-ScheduledTask -TaskName $TaskName
-    Log "Scheduled task registered: $TaskName (state: $($task.State), daily at $TaskTime, highest privileges)"
+    Write-BootstrapLog "Scheduled task registered: $TaskName (state: $($task.State), daily at $TaskTime, highest privileges)"
+    $taskRegistered = $true
 } catch {
-    Log "Failed to register the scheduled task: $($_.Exception.Message)"
+    Write-BootstrapLog "Failed to register the scheduled task: $($_.Exception.Message)"
+}
+
+# ---------------------------------------------------------------- result
+if ($updateExit -ne 0) {
+    Write-BootstrapLog "Done with errors (update exit code: $updateExit, task registered: $taskRegistered)."
+    exit $updateExit
+}
+if (-not $taskRegistered) {
+    Write-BootstrapLog 'Done with errors (update succeeded, task registration failed).'
     exit 1
 }
 
-Log 'Done.'
+Write-BootstrapLog 'Done (update succeeded and scheduled task is registered).'
+exit 0
