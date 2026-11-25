@@ -18,6 +18,7 @@ BeforeAll {
     Mock -CommandName Invoke-Icacls -MockWith {
         $script:IcaclsCalls += ,$IcaclsArgs
     }
+    Mock -CommandName Invoke-TakeOwnership -MockWith { }
 }
 
 AfterAll {
@@ -51,12 +52,9 @@ Describe 'Install-ProtectedDeployment' {
         Test-Path -LiteralPath (Join-Path $script:DeployRoot 'lib\HWiNFO.Deploy.ps1') | Should -BeTrue
         Test-Path -LiteralPath (Join-Path $script:DeployRoot 'Downloads') | Should -BeTrue
 
-        $rootCalls = @($script:IcaclsCalls | Where-Object {
-            $_[0] -eq $script:DeployRoot -and
-            $_ -contains '/setowner' -and
-            $_ -contains '*S-1-5-32-544'
-        })
-        $rootCalls.Count | Should -Be 1
+        Should -Invoke -CommandName Invoke-TakeOwnership -Times 1 -ParameterFilter {
+            $Path -eq $script:DeployRoot
+        }
 
         $resetCalls = @($script:IcaclsCalls | Where-Object {
             $_[0] -eq $script:DeployRoot -and $_ -contains '/reset'

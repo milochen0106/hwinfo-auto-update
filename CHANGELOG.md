@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-11-26
+
+### Fixed
+
+- Protected deployment now assigns ownership with `takeown.exe /F <path> /A`
+  instead of `icacls /setowner *S-1-5-32-544`. On Windows, `icacls /setowner`
+  to a group SID returns access denied (exit code 5) even from an elevated
+  shell because it does not enable `SeTakeOwnershipPrivilege`; `takeown /A`
+  enables it and sets the owner directly to `BUILTIN\Administrators`, which is
+  the owner this deployment requires. This was found during the first real
+  elevated migration, not by the mocked test suite.
+- Documentation now states the `takeown /A` requirement and the observed
+  `icacls` exit code 5 failure mode.
+
 ## [1.3.0] - 2026-11-26
 
 Privilege-boundary hardening. The scheduled task no longer runs code from a

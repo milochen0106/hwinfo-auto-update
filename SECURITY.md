@@ -4,7 +4,7 @@
 
 | Version | Supported |
 | --- | --- |
-| 1.3.x | Yes |
+| 1.3.x | Yes (use 1.3.1 or newer) |
 | 1.2.x | Superseded (upgrade recommended) |
 | 1.1.x | No (superseded by 1.2.0) |
 | 1.0.x | No (superseded by 1.1.0) |
@@ -27,9 +27,11 @@ scripts it loads must not be writable by a standard user. Bootstrap now:
 1. Copies `Update-HWiNFO.ps1`, both `lib\*.ps1` files and itself into
    `%ProgramData%\HWiNFO-AutoUpdate\`.
 2. Resets any pre-existing explicit ACEs with `icacls /reset`, removes inherited
-   ACLs on that directory and everything under it, sets the owner to
-   `BUILTIN\Administrators`, and grants full control only to `SYSTEM` and
-   `BUILTIN\Administrators`. `/reset` matters because a standard user can create
+   ACLs on that directory and everything under it, assigns ownership to
+   `BUILTIN\Administrators` with `takeown /A`, and grants full control only to
+   `SYSTEM` and `BUILTIN\Administrators`. `takeown /A` is used because
+   `icacls /setowner` to a group SID returns access denied (exit 5) even when
+   elevated; it does not enable `SeTakeOwnershipPrivilege`. `/reset` matters because a standard user can create
    a same-named directory in `%ProgramData%` first; without it, an explicit ACE
    they planted would survive `/inheritance:r`. Owner is changed because a
    remaining individual owner retains implicit `WRITE_DAC` under their standard

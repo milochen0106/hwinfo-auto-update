@@ -285,7 +285,7 @@ Install-Module Pester -MinimumVersion 5.5.0 -Force -Scope CurrentUser
 Invoke-Pester -Path ./tests -Output Detailed
 ```
 
-測試不連網、不安裝 HWiNFO、不真的改 ACL，也不需要系統管理員權限。純函式測試使用 XML fixture 與 Windows 內建的簽章檔案；部署測試 mock `icacls` 並把 `ProgramData` 導向暫時目錄；整合測試把 `Update-HWiNFO.ps1` 以 dot-source 搭配 `-AllowUnprotectedRun` 指向暫時安裝目錄，並 mock 掉 winget、下載、安裝結束碼與運行中行程，涵蓋 winget 成功／失敗、備援下載、winget 成功但版本未變、驗證失敗、更新失敗時是否依 `-NoRestore` 重啟 HWiNFO，以及使用者提供安裝檔會先暫存到 `Downloads\`。CI（`.github/workflows/tests.yml`）在每次 push 與 PR 執行同一套測試、以 error 等級跑 PSScriptAnalyzer，並用 Windows PowerShell 5.1 解析所有 `.ps1`。文件頂端的 badge 指向 `main` 最近一次執行結果，個別紀錄在 Actions 分頁。
+測試不連網、不安裝 HWiNFO、不真的改 ACL，也不需要系統管理員權限。純函式測試使用 XML fixture 與 Windows 內建的簽章檔案；部署測試 mock `icacls` 與 `takeown` 並把 `ProgramData` 導向暫時目錄；整合測試把 `Update-HWiNFO.ps1` 以 dot-source 搭配 `-AllowUnprotectedRun` 指向暫時安裝目錄，並 mock 掉 winget、下載、安裝結束碼與運行中行程，涵蓋 winget 成功／失敗、備援下載、winget 成功但版本未變、驗證失敗、更新失敗時是否依 `-NoRestore` 重啟 HWiNFO，以及使用者提供安裝檔會先暫存到 `Downloads\`。CI（`.github/workflows/tests.yml`）在每次 push 與 PR 執行同一套測試、以 error 等級跑 PSScriptAnalyzer，並用 Windows PowerShell 5.1 解析所有 `.ps1`。文件頂端的 badge 指向 `main` 最近一次執行結果，個別紀錄在 Actions 分頁。
 
 目前沒有會真正執行升級或觸發 UAC 提權的自動化測試；那些路徑仍以 `-CheckOnly` 加人工檢視日誌驗證。
 
@@ -299,6 +299,7 @@ Invoke-Pester -Path ./tests -Output Detailed
 | 官方 CDN 對 `Invoke-WebRequest` 回 `403` | 該用戶端被 CDN 擋下 | 腳本已優先用 `curl.exe` + 瀏覽器 UA；請保留 `curl.exe` |
 | winget 下載卡住幾分鐘 | winget manifest 指向較慢的鏡像（`sac.sk`） | 等待，或改用手動下載的安裝檔 + `-InstallerPath` |
 | UAC 被取消／逾時 | 提升行程根本沒啟動，未做任何異動 | 重跑 Bootstrap 並按「是」 |
+| `Failed to deploy protected copy: icacls ... /setowner ... exit code 5` | 舊版（1.3.0）用 `icacls` 設群組 owner，Windows 即使提權仍拒絕 | 升級到 1.3.1+；改用 `takeown /A` 設 owner |
 | `Access denied`（`Wait-Process`／`Stop-Process`） | 非提升行程不能控制提升行程 | 從提升後的 Bootstrap 用 `-StalePids` 清理 |
 | `Refusing to run from an unprotected location: ...` | 直接從 Downloads／repo clone 執行 `Update-HWiNFO.ps1` | 改執行 `%ProgramData%\HWiNFO-AutoUpdate\Update-HWiNFO.ps1`；開發或測試才用 `-AllowUnprotectedRun` |
 | `A protected deployment already exists ...` | 從可寫入的 clone 重跑 Bootstrap | 改從 `%ProgramData%\HWiNFO-AutoUpdate\Bootstrap-HWiNFO-AutoUpdate.ps1` 執行；確定要覆蓋部署包才加 `-ForceRedeploy` |

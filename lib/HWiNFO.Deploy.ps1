@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Unlike HWiNFO.Core.ps1, these helpers perform file-system and icacls I/O.
-    They are kept separate so Pester can test them with mocked icacls calls.
+    They are kept separate so Pester can test them with mocked icacls/takeown calls.
     Dot-source HWiNFO.Core.ps1 first because Test-ProtectedRunLocation is used.
 #>
 
@@ -18,6 +18,26 @@ function Invoke-Icacls {
     & icacls @IcaclsArgs | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw "icacls $($IcaclsArgs -join ' ') failed with exit code $LASTEXITCODE"
+    }
+}
+
+function Invoke-TakeOwnership {
+    <#
+    .SYNOPSIS
+        Assigns ownership to BUILTIN\Administrators using takeown /A.
+
+    .DESCRIPTION
+        icacls /setowner to a group SID fails with access denied (exit 5) even
+        from an elevated shell: it does not enable SeTakeOwnershipPrivilege.
+        takeown /A enables that privilege and sets the owner directly to the
+        Administrators group, which is the owner this deployment requires.
+    #>
+    param([Parameter(Mandatory)][string] $Path)
+
+    $takeown = Join-Path $env:SystemRoot 'System32\takeown.exe'
+    & $takeown /F $Path /A | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "takeown /A failed for $Path with exit code $LASTEXITCODE"
     }
 }
 
@@ -45,7 +65,7 @@ function Protect-HWiNFODeployRoot {
     # /inheritance:r only removes inherited entries and keeps an attacker's grant.
     Invoke-Icacls @($Path, '/reset')
     Invoke-Icacls @($Path, '/inheritance:r')
-    Invoke-Icacls @($Path, '/setowner', $admins)
+    Invoke-TakeOwnership -Path $Path
     Invoke-Icacls @($Path, '/grant:r', "${system}:(OI)(CI)F")
     Invoke-Icacls @($Path, '/grant:r', "${admins}:(OI)(CI)F")
 
@@ -56,7 +76,7 @@ function Protect-HWiNFODeployRoot {
         $permission = if ($_.PSIsContainer) { '(OI)(CI)F' } else { 'F' }
         Invoke-Icacls @($_.FullName, '/reset')
         Invoke-Icacls @($_.FullName, '/inheritance:r')
-        Invoke-Icacls @($_.FullName, '/setowner', $admins)
+        Invoke-TakeOwnership -Path $_.FullName
         Invoke-Icacls @($_.FullName, '/grant:r', "${system}:$permission")
         Invoke-Icacls @($_.FullName, '/grant:r', "${admins}:$permission")
     }
