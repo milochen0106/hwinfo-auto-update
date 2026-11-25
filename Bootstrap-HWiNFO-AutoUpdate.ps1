@@ -30,6 +30,9 @@
 .PARAMETER StalePids
     Optional list of process IDs from a previous, stuck update run to terminate.
     Only the listed PIDs are touched; unrelated winget processes are never stopped.
+    A PID is accepted only if it currently belongs to powershell/pwsh with this
+    project's script as its -File argument. Windows can reuse a PID between that
+    check and termination, so pass only freshly observed, trusted PIDs.
 
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File .\Bootstrap-HWiNFO-AutoUpdate.ps1

@@ -208,6 +208,8 @@ Unregister-ScheduledTask -TaskName 'HWiNFO-AutoUpdate' -Confirm:$false
 
 Note: when passing an array from `powershell -Command`, use `-StalePids @(1234,5678)`; `-StalePids 1234,5678` is parsed as a single string by PowerShell's command-line binding. `-TaskName` must be a valid task name (no `\ / : * ? " < > |`) and `-TaskTime` must be `HH:mm` in 24-hour form; both are validated before elevation, so a typo never leaves a half-configured task behind.
 
+`-StalePids` is a repair tool, not a routine switch: pass only freshly observed PIDs whose origin you trust. There is a small time-of-check/time-of-use window in which Windows may reuse a PID after the identity check and before termination; the check greatly reduces the risk but cannot eliminate it.
+
 ## Files and paths
 
 | Item | Location | Purpose |
@@ -286,7 +288,7 @@ No test performs a real upgrade or exercises UAC elevation; those paths are stil
   The SHA-256 is then logged for your own auditing, but it is not pinned.
 - `-InstallerPath` runs the same checks, so a tampered file is rejected before execution.
 - Downloads go to a `.part` file and are promoted only after a minimum-size check (10 MB); a failed `curl.exe` run discards its partial file before `Invoke-WebRequest` is tried. A stale or truncated file from an earlier run is never reused.
-- `-StalePids` refuses to stop a PID unless it belongs to `powershell`/`pwsh` **and** the parsed `-File` argument is exactly one of this project's scripts. A path appearing elsewhere in the command line (for example as a value to `-Command` or another parameter) is not enough — Windows can reuse PIDs, so an ID alone is not proof of identity.
+- `-StalePids` refuses to stop a PID unless it belongs to `powershell`/`pwsh` **and** the parsed `-File` argument is exactly one of this project's scripts. A path appearing elsewhere in the command line (for example as a value to `-Command` or another parameter) is not enough — Windows can reuse PIDs, so an ID alone is not proof of identity. A residual TOCTOU race remains between verification and termination; use only fresh, trusted PIDs.
 - The scripts store no credentials, tokens, or personally identifiable configuration; they only read public HTTPS endpoints and local installation metadata.
 - Git commit metadata for this repository uses a GitHub noreply address; no personal email address is exposed in the public history.
 - UAC elevation is requested explicitly by the bootstrap. Review the script before approving elevation on a new machine.

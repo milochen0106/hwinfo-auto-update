@@ -19,6 +19,10 @@ Reliability pass on the update workflow itself. No new dependencies, no change t
 - The main flow was extracted into `Invoke-UpdateWorkflow` so its control flow is testable; command-line parameters and exit codes are unchanged.
 - README and the Traditional Chinese guide now describe the integration tests and their limits (no real upgrade, no UAC elevation).
 
+### Known limitation
+
+- `-StalePids` verifies the process identity immediately before termination, but Windows can still reuse a PID between that check and `Stop-Process`. This residual TOCTOU race is documented in `SECURITY.md` and both READMEs; pass only freshly observed, trusted PIDs.
+
 ## [1.1.2] - 2026-11-26
 
 ### Fixed

@@ -195,6 +195,7 @@ flowchart TD
 
 > 從 `powershell -Command` 傳陣列請用 `-StalePids @(1234,5678)`；寫成 `-StalePids 1234,5678` 會被當成單一字串。
 > `-TaskName` 不得含 `\ / : * ? " < > |`，`-TaskTime` 必須是 24 小時制 `HH:mm`；兩者都在提權**前**驗證，打錯不會留下半套設定。
+> `-StalePids` 是修復用參數，不是例行開關：請只傳入剛剛觀察到、來源可信的 PID。在身分檢查與實際終止之間仍有極小的 TOCTOU 時窗，Windows 可能在此期間重用 PID；檢查能大幅降低風險，但無法完全消除。
 
 ---
 
@@ -298,7 +299,7 @@ Invoke-Pester -Path ./tests -Output Detailed
 - **雜湊驗證**：winget 路徑比對的是**套件 manifest 中記錄的 SHA-256**，不是另外由 REALiX 發布的雜湊值，因此不把它當成「發行者提供」。直接下載路徑在執行前做三項檢查：(1) PE 結構檢查（`MZ`、`e_lfanew` 處的 PE 簽章、機器類型非零、至少一個 section、PE32/PE32+ optional header）——這只是「外形」檢查，不能用來證明檔案完整；(2) Authenticode 簽章狀態為 `Valid`；(3) 以可處理引號的解析器取出憑證**組織欄位 `O`，並要求精確等於 `REALiX, s.r.o.`**。只含「REALiX」字樣或由其他發行者簽出的有效憑證都會被拒絕。比對的是法律實體而非憑證指紋，因此同一發行者換發新憑證仍可通過。
 - **`-InstallerPath` 同樣驗證**：你提供的安裝檔也要通過上述三項檢查，被掉包或損毀的檔案不會被執行。
 - **下載備援**：先寫入 `.part` 暫存檔，超過 10 MB 才會改名為正式檔；curl 失敗時先清掉不完整檔案，再試 `Invoke-WebRequest`。上次留下的截斷檔不會被當成成功下載。
-- **PID 誤殺防護**：`-StalePids` 只接受 `powershell`／`pwsh`，且從命令列解析出的 `-File` 參數精確等於本專案腳本路徑的行程；只是把路徑寫在 `-Command` 或其他參數中不算。Windows 會重用 PID，單靠 ID 不足以證明身分。
+- **PID 誤殺防護**：`-StalePids` 只接受 `powershell`／`pwsh`，且從命令列解析出的 `-File` 參數精確等於本專案腳本路徑的行程；只是把路徑寫在 `-Command` 或其他參數中不算。Windows 會重用 PID，單靠 ID 不足以證明身分；在檢查與終止之間仍有極小的 TOCTOU 時窗，因此請只傳入剛觀察到、來源可信的 PID。
 - **無憑證儲存**：腳本不保存任何憑證、token 或個人化設定，只讀取公開 HTTPS 端點與本機安裝資訊。
 - **權限透明**：提升權限由 Bootstrap 明確觸發 UAC；在新的電腦上請先審視腳本再按「是」。
 
