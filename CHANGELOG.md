@@ -5,6 +5,30 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-11-26
+
+Reliability pass on the update workflow itself. No new dependencies, no change to the public parameters or to the update paths.
+
+### Added
+
+- `tests/Update-HWiNFO.Workflow.Tests.ps1`: 13 integration tests of `Invoke-UpdateWorkflow` and `Invoke-ManualUpgrade` (59 total). Every network call, winget invocation, installer start and running-process lookup is mocked, so the suite stays unprivileged and touches nothing outside a temp directory. Covered: already up to date, downgrade skip, explicit downgrade, `-CheckOnly`, winget success, winget non-zero exit code, winget success with an unchanged binary, supplied installer, verification failure, restart on failure, `-NoRestore`, and installer exit-code handling.
+- The workflow can now be exercised without installing anything: `Update-HWiNFO.ps1` calls `exit` only when launched as a file, not when dot-sourced by the tests.
+
+### Changed
+
+- The main flow was extracted into `Invoke-UpdateWorkflow` so its control flow is testable; command-line parameters and exit codes are unchanged.
+- README and the Traditional Chinese guide now describe the integration tests and their limits (no real upgrade, no UAC elevation).
+
+## [1.1.2] - 2026-11-26
+
+### Fixed
+
+- `-StalePids` no longer accepts a process merely because the script path appears somewhere in its command line. The command line is parsed for a real `-File` argument (quoted, single-quoted, unquoted or `-File=path`), and the value must match one of the expected scripts exactly (case-insensitive). A path used as a value to `-Command` or another parameter is rejected.
+
+### Added
+
+- Seven helper tests covering false-positive command lines and the supported `-File` forms (46 tests after this release).
+
 ## [1.1.1] - 2026-11-26
 
 Bug-fix pass after a second static review. No architecture changes and no new dependencies.

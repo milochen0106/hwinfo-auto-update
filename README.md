@@ -204,7 +204,7 @@ Unregister-ScheduledTask -TaskName 'HWiNFO-AutoUpdate' -Confirm:$false
 | `-TaskName` | string | `HWiNFO-AutoUpdate` | Scheduled task name. |
 | `-TaskTime` | string | `09:00` | Daily run time (`HH:mm`). |
 | `-InstallerPath` | string | none | Passed through to `Update-HWiNFO.ps1`. |
-| `-StalePids` | int[] | none | Process IDs of a previous stuck update to terminate before upgrading. Only listed PIDs are touched, and only if they are PowerShell processes whose command line names one of this project's scripts. |
+| `-StalePids` | int[] | none | Process IDs of a previous stuck update to terminate before upgrading. Only listed PIDs are touched, and only if they belong to `powershell`/`pwsh` and the parsed `-File` argument is exactly one of this project's scripts. |
 
 Note: when passing an array from `powershell -Command`, use `-StalePids @(1234,5678)`; `-StalePids 1234,5678` is parsed as a single string by PowerShell's command-line binding. `-TaskName` must be a valid task name (no `\ / : * ? " < > |`) and `-TaskTime` must be `HH:mm` in 24-hour form; both are validated before elevation, so a typo never leaves a half-configured task behind.
 
@@ -216,6 +216,7 @@ Note: when passing an array from `powershell -Command`, use `-StalePids @(1234,5
 | `Bootstrap-HWiNFO-AutoUpdate.ps1` | repository root | Elevation + task registration. |
 | `lib/HWiNFO.Core.ps1` | `lib/` | Pure helper functions (version parsing, feed parsing, PE check, signature check, input validation). Dot-sourced by both scripts and by the tests. |
 | `tests/HWiNFO.Core.Tests.ps1` | `tests/` | Pester tests for the helpers; no network and no installation. |
+| `tests/Update-HWiNFO.Workflow.Tests.ps1` | `tests/` | Pester integration tests of the workflow with all external effects mocked. |
 | `.github/workflows/tests.yml` | `.github/` | CI: Pester + PSScriptAnalyzer on `windows-latest`. |
 | `Update-HWiNFO.log` | repository root | Append-only run log. |
 | `Bootstrap-HWiNFO-AutoUpdate.log` | repository root | One-time setup log. |
@@ -253,9 +254,9 @@ Install-Module Pester -MinimumVersion 5.5.0 -Force -Scope CurrentUser
 Invoke-Pester -Path ./tests -Output Detailed
 ```
 
-The suite is deliberately pure: it uses XML fixtures and Windows-signed binaries, so it never installs HWiNFO, never touches the network, and runs unprivileged. CI (`.github/workflows/tests.yml`) runs the same tests plus PSScriptAnalyzer (error and warning severity) and a Windows PowerShell 5.1 parse check on every push and pull request. The badge at the top of this file links to the latest run on `main`; individual runs are also listed on the Actions tab.
+The suite runs unprivileged and never touches the network or an installed HWiNFO. Helper tests use XML fixtures and Windows-signed binaries. Integration tests dot-source `Update-HWiNFO.ps1` against a temporary install directory and mock every external effect (winget, download, installer exit code, running processes), covering winget success/failure, the direct-download fallback, an unchanged binary after winget reports success, verification failure, and restart-on-failure with and without `-NoRestore`. CI (`.github/workflows/tests.yml`) runs the same tests plus PSScriptAnalyzer (error and warning severity) and a Windows PowerShell 5.1 parse check on every push and pull request. The badge at the top of this file links to the latest run on `main`; individual runs are also listed on the Actions tab.
 
-There are no tests that perform a real upgrade or exercise elevation; those paths are verified manually with `-CheckOnly` and by reading the logs.
+No test performs a real upgrade or exercises UAC elevation; those paths are still verified manually with `-CheckOnly` and by reading the logs.
 
 ## Troubleshooting
 
@@ -285,7 +286,7 @@ There are no tests that perform a real upgrade or exercise elevation; those path
   The SHA-256 is then logged for your own auditing, but it is not pinned.
 - `-InstallerPath` runs the same checks, so a tampered file is rejected before execution.
 - Downloads go to a `.part` file and are promoted only after a minimum-size check (10 MB); a failed `curl.exe` run discards its partial file before `Invoke-WebRequest` is tried. A stale or truncated file from an earlier run is never reused.
-- `-StalePids` refuses to stop a PID unless it belongs to `powershell`/`pwsh` **and** its command line names one of this project's scripts — Windows can reuse PIDs, so an ID alone is not proof of identity.
+- `-StalePids` refuses to stop a PID unless it belongs to `powershell`/`pwsh` **and** the parsed `-File` argument is exactly one of this project's scripts. A path appearing elsewhere in the command line (for example as a value to `-Command` or another parameter) is not enough — Windows can reuse PIDs, so an ID alone is not proof of identity.
 - The scripts store no credentials, tokens, or personally identifiable configuration; they only read public HTTPS endpoints and local installation metadata.
 - Git commit metadata for this repository uses a GitHub noreply address; no personal email address is exposed in the public history.
 - UAC elevation is requested explicitly by the bootstrap. Review the script before approving elevation on a new machine.

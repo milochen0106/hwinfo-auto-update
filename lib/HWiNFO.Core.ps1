@@ -182,16 +182,43 @@ function Test-TrustedInstaller {
 }
 
 # ---------------------------------------------------------------- stale process cleanup
+function Get-PowerShellFileArgument {
+    <#
+    .SYNOPSIS
+        Extracts the script path passed to PowerShell's -File parameter.
+
+    .DESCRIPTION
+        Only a real -File argument is recognised. A path that merely appears
+        somewhere else in the command line (for example as a value to -Command
+        or as a positional argument) is deliberately ignored.
+
+        Returns $null when -File is absent or cannot be parsed.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string] $CommandLine)
+
+    # Quoted values come first so that paths containing spaces are kept intact.
+    $pattern = '(?:^|\s)-file(?:=|\s+)(?:"([^"]+)"|''([^'']+)''|(\S+))'
+    $match   = [regex]::Match($CommandLine, $pattern, [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if (-not $match.Success) { return $null }
+
+    foreach ($index in 1..3) {
+        if ($match.Groups[$index].Success -and -not [string]::IsNullOrWhiteSpace($match.Groups[$index].Value)) {
+            return $match.Groups[$index].Value.Trim('"', "'")
+        }
+    }
+    return $null
+}
+
 function Test-StaleProcessMatch {
     <#
     .SYNOPSIS
-        Returns $true when a process looks like a leftover run of this project's scripts.
+        Returns $true when a process really is a leftover run of this project's scripts.
 
     .DESCRIPTION
         Windows reuses process IDs, so a PID recorded during an earlier failure may
         belong to an unrelated program later. A process is only a safe target when
-        it is a PowerShell host and its command line names one of the expected
-        script paths.
+        it is a PowerShell host whose -File argument is exactly one of the expected
+        script paths. A substring anywhere in the command line is not accepted.
     #>
     param(
         [string] $ProcessName,
@@ -203,9 +230,12 @@ function Test-StaleProcessMatch {
     if ($ProcessName -notin @('powershell', 'pwsh')) { return $false }
     if ([string]::IsNullOrWhiteSpace($CommandLine)) { return $false }
 
+    $filePath = Get-PowerShellFileArgument -CommandLine $CommandLine
+    if (-not $filePath) { return $false }
+
     foreach ($expected in $ExpectedPaths) {
         if ([string]::IsNullOrWhiteSpace($expected)) { continue }
-        if ($CommandLine.IndexOf($expected, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        if ([string]::Equals($filePath, $expected, [StringComparison]::OrdinalIgnoreCase)) {
             return $true
         }
     }

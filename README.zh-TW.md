@@ -191,7 +191,7 @@ flowchart TD
 | `-TaskName` | string | `HWiNFO-AutoUpdate` | 排程工作名稱 |
 | `-TaskTime` | string | `09:00` | 每日執行時間（`HH:mm`） |
 | `-InstallerPath` | string | 無 | 轉傳給 `Update-HWiNFO.ps1` |
-| `-StalePids` | int[] | 無 | 更新前先終止的舊行程 PID；只處理 PowerShell 行程且命令列含本專案腳本路徑者 |
+| `-StalePids` | int[] | 無 | 更新前先終止的舊行程 PID；只處理 `powershell`／`pwsh`，且解析出的 `-File` 參數精確等於本專案腳本路徑者 |
 
 > 從 `powershell -Command` 傳陣列請用 `-StalePids @(1234,5678)`；寫成 `-StalePids 1234,5678` 會被當成單一字串。
 > `-TaskName` 不得含 `\ / : * ? " < > |`，`-TaskTime` 必須是 24 小時制 `HH:mm`；兩者都在提權**前**驗證，打錯不會留下半套設定。
@@ -230,6 +230,7 @@ Unregister-ScheduledTask -TaskName 'HWiNFO-AutoUpdate' -Confirm:$false
 | `Bootstrap-HWiNFO-AutoUpdate.ps1` | repo 根目錄 | 提升權限與註冊排程 |
 | `lib/HWiNFO.Core.ps1` | `lib/` | 純函式（版本解析、RSS 解析、PE 檢查、簽章檢查、參數驗證），由兩支腳本與測試共用 |
 | `tests/HWiNFO.Core.Tests.ps1` | `tests/` | Pester 測試；不連網、不安裝 |
+| `tests/Update-HWiNFO.Workflow.Tests.ps1` | `tests/` | Pester 整合測試；以 mock 模擬所有外部效應 |
 | `.github/workflows/tests.yml` | `.github/` | CI：在 `windows-latest` 跑 Pester 與 PSScriptAnalyzer |
 | `Update-HWiNFO.log` | repo 根目錄 | 追加式執行紀錄 |
 | `Bootstrap-HWiNFO-AutoUpdate.log` | repo 根目錄 | 一次性安裝紀錄 |
@@ -263,9 +264,9 @@ Install-Module Pester -MinimumVersion 5.5.0 -Force -Scope CurrentUser
 Invoke-Pester -Path ./tests -Output Detailed
 ```
 
-測試刻意保持「純函式」：使用 XML fixture、Windows 內建的簽章檔案與暫存檔，因此不連網、不安裝 HWiNFO，也不需要系統管理員權限。CI（`.github/workflows/tests.yml`）在每次 push 與 PR 執行同一套測試、以 error/warning 等級跑 PSScriptAnalyzer，並用 Windows PowerShell 5.1 解析所有 `.ps1`。文件頂端的 badge 指向 `main` 最近一次執行結果，個別紀錄在 Actions 分頁。
+測試不連網、不安裝 HWiNFO，也不需要系統管理員權限。純函式測試使用 XML fixture 與 Windows 內建的簽章檔案；整合測試把 `Update-HWiNFO.ps1` 以 dot-source 方式指向暫時安裝目錄，並 mock 掉 winget、下載、安裝結束碼與運行中行程，涵蓋 winget 成功／失敗、備援下載、winget 成功但版本未變、驗證失敗，以及更新失敗時是否依 `-NoRestore` 重啟 HWiNFO。CI（`.github/workflows/tests.yml`）在每次 push 與 PR 執行同一套測試、以 error/warning 等級跑 PSScriptAnalyzer，並用 Windows PowerShell 5.1 解析所有 `.ps1`。文件頂端的 badge 指向 `main` 最近一次執行結果，個別紀錄在 Actions 分頁。
 
-目前沒有會真正執行升級或提權的自動化測試；那些路徑仍以 `-CheckOnly` 加人工檢視日誌驗證。
+目前沒有會真正執行升級或觸發 UAC 提權的自動化測試；那些路徑仍以 `-CheckOnly` 加人工檢視日誌驗證。
 
 ---
 
@@ -297,7 +298,7 @@ Invoke-Pester -Path ./tests -Output Detailed
 - **雜湊驗證**：winget 路徑比對的是**套件 manifest 中記錄的 SHA-256**，不是另外由 REALiX 發布的雜湊值，因此不把它當成「發行者提供」。直接下載路徑在執行前做三項檢查：(1) PE 結構檢查（`MZ`、`e_lfanew` 處的 PE 簽章、機器類型非零、至少一個 section、PE32/PE32+ optional header）——這只是「外形」檢查，不能用來證明檔案完整；(2) Authenticode 簽章狀態為 `Valid`；(3) 以可處理引號的解析器取出憑證**組織欄位 `O`，並要求精確等於 `REALiX, s.r.o.`**。只含「REALiX」字樣或由其他發行者簽出的有效憑證都會被拒絕。比對的是法律實體而非憑證指紋，因此同一發行者換發新憑證仍可通過。
 - **`-InstallerPath` 同樣驗證**：你提供的安裝檔也要通過上述三項檢查，被掉包或損毀的檔案不會被執行。
 - **下載備援**：先寫入 `.part` 暫存檔，超過 10 MB 才會改名為正式檔；curl 失敗時先清掉不完整檔案，再試 `Invoke-WebRequest`。上次留下的截斷檔不會被當成成功下載。
-- **PID 誤殺防護**：`-StalePids` 只接受 `powershell`／`pwsh` 且命令列含本專案腳本路徑的行程；Windows 會重用 PID，單靠 ID 不足以證明身分。
+- **PID 誤殺防護**：`-StalePids` 只接受 `powershell`／`pwsh`，且從命令列解析出的 `-File` 參數精確等於本專案腳本路徑的行程；只是把路徑寫在 `-Command` 或其他參數中不算。Windows 會重用 PID，單靠 ID 不足以證明身分。
 - **無憑證儲存**：腳本不保存任何憑證、token 或個人化設定，只讀取公開 HTTPS 端點與本機安裝資訊。
 - **權限透明**：提升權限由 Bootstrap 明確觸發 UAC；在新的電腦上請先審視腳本再按「是」。
 

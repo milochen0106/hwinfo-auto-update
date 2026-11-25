@@ -190,6 +190,47 @@ Describe 'Test-StaleProcessMatch' {
         Test-StaleProcessMatch -ProcessName 'powershell' -CommandLine '' -ExpectedPaths $script:UpdateScript |
             Should -BeFalse
     }
+
+    It 'rejects a path that only appears as an unrelated parameter' {
+        Test-StaleProcessMatch `
+            -ProcessName 'powershell' `
+            -CommandLine 'powershell.exe -NoProfile -File "C:\Scripts\other.ps1" -Log "C:\Scripts\Update-HWiNFO.ps1"' `
+            -ExpectedPaths $script:UpdateScript | Should -BeFalse
+    }
+
+    It 'rejects a -Command invocation that merely mentions the script' {
+        Test-StaleProcessMatch `
+            -ProcessName 'powershell' `
+            -CommandLine 'powershell.exe -Command "& ''C:\Scripts\Update-HWiNFO.ps1''"' `
+            -ExpectedPaths $script:UpdateScript | Should -BeFalse
+    }
+
+    It 'rejects a host with no -File argument at all' {
+        Test-StaleProcessMatch -ProcessName 'powershell' -CommandLine 'powershell.exe -NoProfile' -ExpectedPaths $script:UpdateScript |
+            Should -BeFalse
+    }
+}
+
+Describe 'Get-PowerShellFileArgument' {
+    It 'reads a quoted -File value containing spaces' {
+        Get-PowerShellFileArgument -CommandLine 'powershell.exe -File "C:\Scripts\HWiNFO Auto\Update-HWiNFO.ps1"' |
+            Should -Be 'C:\Scripts\HWiNFO Auto\Update-HWiNFO.ps1'
+    }
+
+    It 'reads an unquoted -File value' {
+        Get-PowerShellFileArgument -CommandLine 'powershell.exe -NoProfile -File C:\Scripts\Update-HWiNFO.ps1' |
+            Should -Be 'C:\Scripts\Update-HWiNFO.ps1'
+    }
+
+    It 'reads -File=path' {
+        Get-PowerShellFileArgument -CommandLine 'pwsh.exe -File=C:\Scripts\Update-HWiNFO.ps1' |
+            Should -Be 'C:\Scripts\Update-HWiNFO.ps1'
+    }
+
+    It 'returns null when -File is missing' {
+        Get-PowerShellFileArgument -CommandLine 'powershell.exe -Command "Get-Date"' |
+            Should -BeNullOrEmpty
+    }
 }
 
 Describe 'Test-ValidTaskTime' {

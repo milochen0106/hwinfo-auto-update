@@ -342,113 +342,138 @@ function Invoke-ManualUpgrade {
     }
 }
 
-# ---------------------------------------------------------------- main
-Write-UpdateLog '========== HWiNFO auto-update check started =========='
-Write-UpdateLog "Install directory: $resolvedInstallDir"
+# ---------------------------------------------------------------- workflow
+# Kept as a function so the control flow can be tested with mocked dependencies
+# without installing anything. The script entry point at the bottom is the only
+# place that calls exit.
+function Invoke-UpdateWorkflow {
+    [CmdletBinding()]
+    param(
+        [switch] $CheckOnly,
+        [switch] $Force,
+        [switch] $AllowDowngrade,
+        [switch] $NoRestore,
+        [string] $InstallerPath
+    )
 
-$updateError = $null
-$afterVersion = $null
-$wasRunning = $false
+    Write-UpdateLog '========== HWiNFO auto-update check started =========='
+    Write-UpdateLog "Install directory: $resolvedInstallDir"
 
-try {
-    $localVersion = Get-LocalVersion
-    Write-UpdateLog "Installed version: $localVersion"
+    $updateError = $null
+    $afterVersion = $null
+    $wasRunning = $false
 
-    $latestVersion = Get-LatestStableVersion
-    Write-UpdateLog "Latest stable version: $latestVersion (source: $RssUrl)"
+    try {
+        $localVersion = Get-LocalVersion
+        Write-UpdateLog "Installed version: $localVersion"
 
-    if ($latestVersion -lt $localVersion -and -not $AllowDowngrade) {
-        Write-UpdateLog "Installed version $localVersion is newer than the feed announcement ($latestVersion). Skipping to avoid a downgrade; use -AllowDowngrade to override." 'WARN'
-        Write-UpdateLog '========== Check completed =========='
-        exit 0
-    }
+        $latestVersion = Get-LatestStableVersion
+        Write-UpdateLog "Latest stable version: $latestVersion (source: $RssUrl)"
 
-    $needUpdate = ($latestVersion -gt $localVersion) -or
-                  $Force -or
-                  ($AllowDowngrade -and $latestVersion -lt $localVersion)
+        if ($latestVersion -lt $localVersion -and -not $AllowDowngrade) {
+            Write-UpdateLog "Installed version $localVersion is newer than the feed announcement ($latestVersion). Skipping to avoid a downgrade; use -AllowDowngrade to override." 'WARN'
+            Write-UpdateLog '========== Check completed =========='
+            return 0
+        }
 
-    if (-not $needUpdate) {
-        Write-UpdateLog 'Already up to date.'
-        Write-UpdateLog '========== Check completed =========='
-        exit 0
-    }
-    if ($CheckOnly) {
-        Write-UpdateLog "New version $latestVersion available (-CheckOnly; no changes made)." 'WARN'
-        Write-UpdateLog '========== Check completed =========='
-        exit 0
-    }
+        $needUpdate = ($latestVersion -gt $localVersion) -or
+                      $Force -or
+                      ($AllowDowngrade -and $latestVersion -lt $localVersion)
 
-    Write-UpdateLog "Updating: $localVersion -> $latestVersion"
+        if (-not $needUpdate) {
+            Write-UpdateLog 'Already up to date.'
+            Write-UpdateLog '========== Check completed =========='
+            return 0
+        }
+        if ($CheckOnly) {
+            Write-UpdateLog "New version $latestVersion available (-CheckOnly; no changes made)." 'WARN'
+            Write-UpdateLog '========== Check completed =========='
+            return 0
+        }
 
-    # Back up user settings before the installer touches the install directory.
-    if (-not (Test-Path -LiteralPath $BackupRoot)) {
-        New-Item -ItemType Directory -Path $BackupRoot -Force | Out-Null
-    }
-    if (Test-Path -LiteralPath $IniPath) {
-        $backup = Join-Path $BackupRoot ('HWiNFO64.{0}.INI' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
-        Copy-Item -LiteralPath $IniPath -Destination $backup -Force
-        Write-UpdateLog "Backed up settings: $backup"
-    }
+        Write-UpdateLog "Updating: $localVersion -> $latestVersion"
 
-    # Inno Setup cannot overwrite files that are in use.
-    $runningIds = @(Get-Process -Name HWiNFO64 -ErrorAction SilentlyContinue |
-        Select-Object -ExpandProperty Id)
-    $wasRunning = $runningIds.Count -gt 0
-    if ($wasRunning) {
-        Write-UpdateLog ("Stopping running HWiNFO64 (PID: {0})..." -f ($runningIds -join ', '))
-        Stop-HWiNFOProcess -ProcessId $runningIds
-        Write-UpdateLog 'HWiNFO64 stopped.'
-    }
+        # Back up user settings before the installer touches the install directory.
+        if (-not (Test-Path -LiteralPath $BackupRoot)) {
+            New-Item -ItemType Directory -Path $BackupRoot -Force | Out-Null
+        }
+        if (Test-Path -LiteralPath $IniPath) {
+            $backup = Join-Path $BackupRoot ('HWiNFO64.{0}.INI' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+            Copy-Item -LiteralPath $IniPath -Destination $backup -Force
+            Write-UpdateLog "Backed up settings: $backup"
+        }
 
-    # Update order: explicit installer > winget > direct download
-    if ($InstallerPath) {
-        Invoke-ManualUpgrade -Version $latestVersion -LocalInstaller $InstallerPath
-    } else {
-        $updated = Invoke-WingetUpgrade -Version $latestVersion
-        if ($updated) {
-            # winget can report success without replacing the binary (for example when the
-            # installed package is not the one it manages). Verify before trusting it.
-            $probe = Get-LocalVersion
-            if ($probe -lt $latestVersion) {
-                Write-UpdateLog "winget reported success but the installed version is still $probe; falling back to direct download" 'WARN'
-                $updated = $false
+        # Inno Setup cannot overwrite files that are in use.
+        $runningIds = @(Get-Process -Name HWiNFO64 -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty Id)
+        $wasRunning = $runningIds.Count -gt 0
+        if ($wasRunning) {
+            Write-UpdateLog ("Stopping running HWiNFO64 (PID: {0})..." -f ($runningIds -join ', '))
+            Stop-HWiNFOProcess -ProcessId $runningIds
+            Write-UpdateLog 'HWiNFO64 stopped.'
+        }
+
+        # Update order: explicit installer > winget > direct download
+        if ($InstallerPath) {
+            Invoke-ManualUpgrade -Version $latestVersion -LocalInstaller $InstallerPath
+        } else {
+            $updated = Invoke-WingetUpgrade -Version $latestVersion
+            if ($updated) {
+                # winget can report success without replacing the binary (for example when the
+                # installed package is not the one it manages). Verify before trusting it.
+                $probe = Get-LocalVersion
+                if ($probe -lt $latestVersion) {
+                    Write-UpdateLog "winget reported success but the installed version is still $probe; falling back to direct download" 'WARN'
+                    $updated = $false
+                }
+            }
+            if (-not $updated) {
+                Invoke-ManualUpgrade -Version $latestVersion
             }
         }
-        if (-not $updated) {
-            Invoke-ManualUpgrade -Version $latestVersion
+
+        # Verify the result.
+        $afterVersion = Get-LocalVersion
+        Write-UpdateLog "Version after update: $afterVersion"
+        if ($AllowDowngrade) {
+            if ($afterVersion -ne $latestVersion) {
+                throw "Update verification failed: expected exactly $latestVersion, got $afterVersion"
+            }
+        } elseif ($afterVersion -lt $latestVersion) {
+            throw "Update verification failed: expected >= $latestVersion, got $afterVersion"
+        }
+    } catch {
+        $updateError = $_
+        Write-UpdateLog "Update failed: $($_.Exception.Message)" 'ERROR'
+    } finally {
+        # Always restore the previous run state, including on failure.
+        if ($wasRunning -and -not $NoRestore) {
+            try {
+                Write-UpdateLog 'Restarting HWiNFO...'
+                Start-Process -FilePath $ExePath -ErrorAction Stop
+            } catch {
+                Write-UpdateLog "Failed to restart HWiNFO: $($_.Exception.Message)" 'WARN'
+            }
         }
     }
 
-    # Verify the result.
-    $afterVersion = Get-LocalVersion
-    Write-UpdateLog "Version after update: $afterVersion"
-    if ($AllowDowngrade) {
-        if ($afterVersion -ne $latestVersion) {
-            throw "Update verification failed: expected exactly $latestVersion, got $afterVersion"
-        }
-    } elseif ($afterVersion -lt $latestVersion) {
-        throw "Update verification failed: expected >= $latestVersion, got $afterVersion"
+    if ($updateError) {
+        Write-UpdateLog '========== Check completed with errors =========='
+        return 1
     }
-} catch {
-    $updateError = $_
-    Write-UpdateLog "Update failed: $($_.Exception.Message)" 'ERROR'
-} finally {
-    # Always restore the previous run state, including on failure.
-    if ($wasRunning -and -not $NoRestore) {
-        try {
-            Write-UpdateLog 'Restarting HWiNFO...'
-            Start-Process -FilePath $ExePath -ErrorAction Stop
-        } catch {
-            Write-UpdateLog "Failed to restart HWiNFO: $($_.Exception.Message)" 'WARN'
-        }
-    }
+
+    Write-UpdateLog "Update complete: $localVersion -> $afterVersion"
+    Write-UpdateLog '========== Check completed =========='
+    return 0
 }
 
-if ($updateError) {
-    Write-UpdateLog '========== Check completed with errors =========='
-    exit 1
+# Dot-sourcing the script (as the integration tests do) defines the functions but
+# must not start an update or call exit. A normal -File invocation does both.
+if ($MyInvocation.InvocationName -ne '.') {
+    exit (Invoke-UpdateWorkflow `
+        -CheckOnly:$CheckOnly `
+        -Force:$Force `
+        -AllowDowngrade:$AllowDowngrade `
+        -NoRestore:$NoRestore `
+        -InstallerPath $InstallerPath)
 }
-
-Write-UpdateLog "Update complete: $localVersion -> $afterVersion"
-Write-UpdateLog '========== Check completed =========='
-exit 0
