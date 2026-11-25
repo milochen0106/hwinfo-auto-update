@@ -264,7 +264,7 @@ Install-Module Pester -MinimumVersion 5.5.0 -Force -Scope CurrentUser
 Invoke-Pester -Path ./tests -Output Detailed
 ```
 
-測試不連網、不安裝 HWiNFO，也不需要系統管理員權限。純函式測試使用 XML fixture 與 Windows 內建的簽章檔案；整合測試把 `Update-HWiNFO.ps1` 以 dot-source 方式指向暫時安裝目錄，並 mock 掉 winget、下載、安裝結束碼與運行中行程，涵蓋 winget 成功／失敗、備援下載、winget 成功但版本未變、驗證失敗，以及更新失敗時是否依 `-NoRestore` 重啟 HWiNFO。CI（`.github/workflows/tests.yml`）在每次 push 與 PR 執行同一套測試、以 error/warning 等級跑 PSScriptAnalyzer，並用 Windows PowerShell 5.1 解析所有 `.ps1`。文件頂端的 badge 指向 `main` 最近一次執行結果，個別紀錄在 Actions 分頁。
+測試不連網、不安裝 HWiNFO，也不需要系統管理員權限。純函式測試使用 XML fixture 與 Windows 內建的簽章檔案；整合測試把 `Update-HWiNFO.ps1` 以 dot-source 方式指向暫時安裝目錄，並 mock 掉 winget、下載、安裝結束碼與運行中行程，涵蓋 winget 成功／失敗、備援下載、winget 成功但版本未變、驗證失敗，以及更新失敗時是否依 `-NoRestore` 重啟 HWiNFO。CI（`.github/workflows/tests.yml`）在每次 push 與 PR 執行同一套測試、以 error 等級跑 PSScriptAnalyzer，並用 Windows PowerShell 5.1 解析所有 `.ps1`。文件頂端的 badge 指向 `main` 最近一次執行結果，個別紀錄在 Actions 分頁。
 
 目前沒有會真正執行升級或觸發 UAC 提權的自動化測試；那些路徑仍以 `-CheckOnly` 加人工檢視日誌驗證。
 
