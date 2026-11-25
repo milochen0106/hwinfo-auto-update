@@ -79,6 +79,9 @@ $DownloadUrl = 'https://www.hwinfo.com/download/'
 $WingetId    = 'REALiX.HWiNFO'
 $TempRoot    = Join-Path $env:TEMP 'HWiNFO-AutoUpdate'
 $BackupRoot  = Join-Path $PSScriptRoot 'HWiNFO-Backups'
+# Every HWiNFO installer is ~20 MB; anything far smaller is an error page or a
+# truncated transfer, not an installer.
+$MinimumInstallerBytes = 10MB
 
 # ---------------------------------------------------------------- logging
 function Write-UpdateLog {
@@ -192,6 +195,41 @@ function Get-InstallerUrl {
 }
 
 # ---------------------------------------------------------------- upgrade paths
+function Stop-HWiNFOProcess {
+    <#
+    .SYNOPSIS
+        Stops every given HWiNFO64 process and waits until the PIDs disappear.
+
+    .DESCRIPTION
+        Works on captured process IDs rather than on the process name. A process
+        can exit between Stop-Process and Wait-Process, and a name-based wait then
+        fails even though the upgrade could proceed safely; polling the captured
+        PIDs removes that race.
+    #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Unattended update script; -WhatIf is deliberately not part of the contract.')]
+    param([Parameter(Mandatory)][int[]] $ProcessId)
+
+    $pending = @($ProcessId)
+    foreach ($targetId in $pending) {
+        try {
+            Stop-Process -Id $targetId -Force -ErrorAction Stop
+        } catch {
+            # Already exited: the polling loop below is the authority on that.
+            Write-UpdateLog "HWiNFO64 PID=$targetId was already gone ($($_.Exception.Message))" 'WARN'
+        }
+    }
+
+    $deadline = (Get-Date).AddSeconds(15)
+    while ($true) {
+        $alive = @($pending | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+        if ($alive.Count -eq 0) { return }
+        if ((Get-Date) -ge $deadline) {
+            throw "HWiNFO64 did not exit within 15 seconds (PID: $($alive -join ', ')); aborting to avoid a partial install"
+        }
+        Start-Sleep -Milliseconds 250
+    }
+}
+
 function Invoke-WingetUpgrade {
     param([Parameter(Mandatory)][version] $Version)
 
@@ -237,6 +275,12 @@ function Invoke-ManualUpgrade {
             New-Item -ItemType Directory -Path $TempRoot -Force | Out-Null
         }
         $installer = Join-Path $TempRoot ("hwi64_{0}.exe" -f $Version.ToString().Replace('.', ''))
+        $partial   = "$installer.part"
+
+        # A previous run may have left a truncated file behind. Download into a
+        # .part file and only promote it after the size check, so "the file exists"
+        # never means "the download succeeded".
+        Remove-Item -LiteralPath $partial, $installer -Force -ErrorAction SilentlyContinue
 
         Write-UpdateLog "Downloading official installer: $url"
         # The official CDN rejects Invoke-WebRequest with 403 in some environments;
@@ -245,16 +289,35 @@ function Invoke-ManualUpgrade {
             & curl.exe -L --fail --silent --show-error --max-time 300 `
                 -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36' `
                 -e 'https://www.hwinfo.com/download/' `
-                -o $installer $url 2>&1 | ForEach-Object { Write-UpdateLog $_ }
-            if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $installer)) {
-                Write-UpdateLog 'curl download failed; trying Invoke-WebRequest' 'WARN'
+                -o $partial $url 2>&1 | ForEach-Object { Write-UpdateLog $_ }
+
+            if ($LASTEXITCODE -ne 0) {
+                Write-UpdateLog "curl exited with code $LASTEXITCODE; discarding the partial download" 'WARN'
+            } elseif (-not (Test-Path -LiteralPath $partial)) {
+                Write-UpdateLog 'curl reported success but produced no file' 'WARN'
+            } elseif ((Get-Item -LiteralPath $partial).Length -lt $MinimumInstallerBytes) {
+                Write-UpdateLog ("curl produced an implausibly small file ({0} bytes); discarding it" -f (Get-Item -LiteralPath $partial).Length) 'WARN'
+            } else {
+                Move-Item -LiteralPath $partial -Destination $installer -Force
+            }
+
+            if (-not (Test-Path -LiteralPath $installer)) {
+                Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
             }
         }
+
         if (-not (Test-Path -LiteralPath $installer)) {
+            Write-UpdateLog 'curl is unavailable or failed; trying Invoke-WebRequest' 'WARN'
             try {
-                Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing `
+                Invoke-WebRequest -Uri $url -OutFile $partial -UseBasicParsing `
                     -TimeoutSec 300 -Headers @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+                $downloadedSize = (Get-Item -LiteralPath $partial).Length
+                if ($downloadedSize -lt $MinimumInstallerBytes) {
+                    throw "Downloaded file is implausibly small ($downloadedSize bytes)"
+                }
+                Move-Item -LiteralPath $partial -Destination $installer -Force
             } catch {
+                Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
                 throw "Failed to download the official installer: $($_.Exception.Message)"
             }
         }
@@ -263,7 +326,7 @@ function Invoke-ManualUpgrade {
     # Integrity gate: reject HTML error pages, truncated files, and installers
     # that are not signed by the expected publisher.
     if (-not (Test-PeFile -Path $installer)) {
-        throw "Downloaded file is not a valid Windows executable (PE/MZ header missing): $installer"
+        throw "Downloaded file is not a structurally valid Windows executable: $installer"
     }
     Test-TrustedInstaller -Path $installer | Out-Null
     $hash = (Get-FileHash -Path $installer -Algorithm SHA256).Hash
@@ -328,15 +391,12 @@ try {
     }
 
     # Inno Setup cannot overwrite files that are in use.
-    $wasRunning = @(Get-Process -Name HWiNFO64 -ErrorAction SilentlyContinue).Count -gt 0
+    $runningIds = @(Get-Process -Name HWiNFO64 -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty Id)
+    $wasRunning = $runningIds.Count -gt 0
     if ($wasRunning) {
-        Write-UpdateLog 'Stopping running HWiNFO64...'
-        Stop-Process -Name HWiNFO64 -Force -ErrorAction Stop
-        try {
-            Wait-Process -Name HWiNFO64 -Timeout 15 -ErrorAction Stop
-        } catch {
-            throw 'HWiNFO64 did not exit within 15 seconds; aborting to avoid a partial install'
-        }
+        Write-UpdateLog ("Stopping running HWiNFO64 (PID: {0})..." -f ($runningIds -join ', '))
+        Stop-HWiNFOProcess -ProcessId $runningIds
         Write-UpdateLog 'HWiNFO64 stopped.'
     }
 

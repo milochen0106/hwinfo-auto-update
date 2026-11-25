@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-11-26
+
+Bug-fix pass after a second static review. No architecture changes and no new dependencies.
+
+### Fixed
+
+- Signer verification now parses the certificate subject into fields and requires the organization (`O`) to equal `REALiX, s.r.o.` exactly. A substring match such as `REALiX`, or a valid certificate from another publisher, is rejected. The check targets the legal entity rather than a thumbprint, so certificate renewal by the same publisher keeps working.
+- HWiNFO shutdown now captures the running PIDs first, stops those PIDs, and polls them for up to 15 seconds. This removes the race where the process exits between `Stop-Process` and a name-based `Wait-Process`.
+- `-StalePids` only stops a PID when it belongs to `powershell`/`pwsh` and its command line names one of this project's scripts. Windows reuses PIDs, so an ID alone is not proof of identity.
+- Downloads now use a `.part` file that is promoted only after a 10 MB minimum-size check. A failed `curl.exe` run discards its partial file before `Invoke-WebRequest` is attempted, and stale files from earlier runs are never reused.
+- `Test-PeFile` now validates the PE signature, machine type, section count and optional-header magic instead of only the `MZ` bytes. The documentation no longer claims the MZ/PE shape check establishes integrity.
+- README wording for winget: the SHA-256 comes from the package manifest, not directly from the publisher.
+
+### Added
+
+- Twelve more Pester tests (39 total) covering quoted/ambiguous certificate subject fields, exact publisher rejection, truncated and HTML files, and stale-PID matching.
+- A Windows PowerShell 5.1 parse check in CI, which caught a `$variable:` interpolation error in the bootstrap during development.
+- A test-status badge in both READMEs linking to the workflow run on `main`.
+
+### Changed
+
+- `Test-TrustedInstaller` parameter renamed from `-SubjectPattern` to `-ExpectedPublisher` (exact match). This is an internal helper; the scripts' public parameters are unchanged.
+
 ## [1.1.0] - 2026-11-26
 
 Reliability and security pass. No behaviour change for a healthy installation; all changes affect failure paths and trust checks.

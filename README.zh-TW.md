@@ -1,3 +1,5 @@
+[![tests](https://github.com/milochen0106/hwinfo-auto-update/actions/workflows/tests.yml/badge.svg)](https://github.com/milochen0106/hwinfo-auto-update/actions/workflows/tests.yml)
+
 # HWiNFO 自動更新工具（繁體中文導覽）
 
 > 語言：[English](README.md) ｜ **繁體中文**
@@ -35,7 +37,7 @@ HWiNFO 內建的「自動更新」功能是 **Pro 版專屬**。若你使用的�
 
 - 版本通知來源不是第三方猜測，而是 **HWiNFO 官方 RSS**（`https://www.hwinfo.com/news.xml/`）。
 - 只認 **正式版**（`HWiNFO v8.60 released`），刻意忽略 Beta / RC / 預發布版本。
-- 更新方式與系統管理員手動執行的一致：winget（驗證發行者 SHA-256）或直接執行官方 Inno Setup 安裝檔。
+- 更新方式與系統管理員手動執行的一致：winget（比對套件 manifest 中記錄的 SHA-256）或直接執行官方 Inno Setup 安裝檔（先驗 PE 結構與Authenticode）。
 
 ---
 
@@ -48,8 +50,8 @@ HWiNFO 內建的「自動更新」功能是 **Pro 版專屬**。若你使用的�
 | 抓取官方通知 | 解析 RSS，篩掉 Beta / RC / pre-release，取最高穩定版 |
 | 比對版本 | 官方版較新才動作；`-CheckOnly` 只回報不異動 |
 | 備份設定 | 更新前將 `HWiNFO64.INI` 另存為時間戳檔名 |
-| 關閉程式 | 停止執行中的 `HWiNFO64`，並用 `Wait-Process` 確認真的結束 |
-| 執行更新 | 優先 winget（含 SHA-256 驗證）；失敗時改為 curl 下載官方安裝檔，先驗 Authenticode 簽章與簽署者（`REALiX, s.r.o.`）再靜默安裝 |
+| 關閉程式 | 先抓取執行中的 HWiNFO64 PID，逐一停止，再輪詢這些 PID 直到消失（最多 15 秒） |
+| 執行更新 | 優先 winget（比對 manifest 記錄的 SHA-256）；失敗時改為 curl 下載官方安裝檔，先驗 PE 結構、Authenticode 簽章與精確發行者（`O=REALiX, s.r.o.`）再靜默安裝 |
 | 驗證結果 | 重新讀取版本；未達目標版本即判定失敗 |
 | 還原狀態 | 若更新前 HWiNFO 正在執行，**即使更新失敗**也會在 `finally` 中重新啟動 |
 | 留下紀錄 | 每一步都寫入 `Update-HWiNFO.log` |
@@ -145,7 +147,7 @@ flowchart TD
 | **HWiNFO 64（官方 Inno 安裝）** | ❌ 需自行安裝 | 版本讀取、備份、更新 | 回報 `Cannot locate HWiNFO64.EXE`；可用 `-InstallDir` 指定 |
 | 系統管理員權限 | ❌ 需 UAC 同意 | 寫入 Program Files、註冊最高權限排程 | `-CheckOnly` 仍可用；實際更新會失敗 |
 | 可連到 `www.hwinfo.com` | ✅ 網路 | RSS、下載頁、安裝檔 | 無法取得版本資訊 |
-| `winget`（App Installer） | 通常有（Win10 1809+ / Win11），但可能被移除 | **建議路徑**，會驗證發行者 SHA-256 | 非必要：自動改走直接下載 |
+| `winget`（App Installer） | 通常有（Win10 1809+ / Win11），但可能被移除 | **建議路徑**，比對套件 manifest 記錄的 SHA-256 | 非必要：自動改走直接下載 |
 | `curl.exe` | ✅ Win10 1809+ / Win11 內建 | 快速備援下載 | 非必要：改走 `Invoke-WebRequest`，但官方 CDN 可能回 403 |
 | 工作排程器 | ✅ 內建 | 每日自動執行 | 僅自動化不可用，手動執行仍可 |
 
@@ -189,7 +191,7 @@ flowchart TD
 | `-TaskName` | string | `HWiNFO-AutoUpdate` | 排程工作名稱 |
 | `-TaskTime` | string | `09:00` | 每日執行時間（`HH:mm`） |
 | `-InstallerPath` | string | 無 | 轉傳給 `Update-HWiNFO.ps1` |
-| `-StalePids` | int[] | 無 | 更新前先終止的舊行程 PID |
+| `-StalePids` | int[] | 無 | 更新前先終止的舊行程 PID；只處理 PowerShell 行程且命令列含本專案腳本路徑者 |
 
 > 從 `powershell -Command` 傳陣列請用 `-StalePids @(1234,5678)`；寫成 `-StalePids 1234,5678` 會被當成單一字串。
 > `-TaskName` 不得含 `\ / : * ? " < > |`，`-TaskTime` 必須是 24 小時制 `HH:mm`；兩者都在提權**前**驗證，打錯不會留下半套設定。
@@ -261,9 +263,9 @@ Install-Module Pester -MinimumVersion 5.5.0 -Force -Scope CurrentUser
 Invoke-Pester -Path ./tests -Output Detailed
 ```
 
-測試刻意保持「純函式」：使用 XML fixture 與 Windows 內建的簽章檔案，因此不連網、不安裝 HWiNFO，也不需要系統管理員權限。CI（`.github/workflows/tests.yml`）在每次 push 與 PR 執行同一套測試，並以 error 等級跑 PSScriptAnalyzer。
+測試刻意保持「純函式」：使用 XML fixture、Windows 內建的簽章檔案與暫存檔，因此不連網、不安裝 HWiNFO，也不需要系統管理員權限。CI（`.github/workflows/tests.yml`）在每次 push 與 PR 執行同一套測試、以 error/warning 等級跑 PSScriptAnalyzer，並用 Windows PowerShell 5.1 解析所有 `.ps1`。文件頂端的 badge 指向 `main` 最近一次執行結果，個別紀錄在 Actions 分頁。
 
-目前沒有會真正執行升級的自動化測試；那一步仍以 `-CheckOnly` 加人工檢視日誌驗證。
+目前沒有會真正執行升級或提權的自動化測試；那些路徑仍以 `-CheckOnly` 加人工檢視日誌驗證。
 
 ---
 
@@ -278,7 +280,8 @@ Invoke-Pester -Path ./tests -Output Detailed
 | `Access denied`（`Wait-Process`／`Stop-Process`） | 非提升行程不能控制提升行程 | 從提升後的 Bootstrap 用 `-StalePids` 清理 |
 | 出現 Beta 但沒安裝 | 設計如此，Beta／RC 被篩掉 | 等正式版；若確定要預發布，需修改 `Get-LatestStableVersion` |
 | HWiNFO 短暫消失 | 更新前會關閉它，完成後再開 | 不希望自動開就用 `-NoRestore` |
-| `Unexpected signer: ...` 或 `Authenticode signature is not valid` | 安裝檔不是 REALiX 簽章（代理頁面、鏡像 HTML、被竄改） | 重新從 `https://www.hwinfo.com/download/` 下載；不要繞過檢查 |
+| `Unexpected publisher '...'` 或 `Authenticode signature is not valid` | 安裝檔不是 `REALiX, s.r.o.` 簽章（代理頁面、鏡像 HTML、被竄改） | 重新從 `https://www.hwinfo.com/download/` 下載；不要繞過檢查 |
+| `Refusing to stop PID=...` | 該 PID 已被 Windows 重用，現在屬於別的程式 | 什麼都沒被終止，可忽略；下次用 `-StalePids` 前先確認 PID |
 | Bootstrap 回 `0` 但什麼都沒發生 | Windows 擋住跨完整性層級的等待 | 看 `Bootstrap-HWiNFO-AutoUpdate.log` 的最終結果 |
 | 首次排程顯示 `267011` | 尚未到執行時間 | 無須處理 |
 
@@ -291,12 +294,14 @@ Invoke-Pester -Path ./tests -Output Detailed
 - **檔案內容**：無個人 email、本機帳號路徑、token、API key 或密碼；`README.md` 中的 `C:\Users\<you>` 是佔位符，不是實際路徑。
 - **Git commit metadata**：已全面改用 `milochen0106@users.noreply.github.com`，不再暴露個人 Gmail。
 - **來源限制**：版本資訊只取自官方 RSS；安裝檔只來自官方下載頁或 winget manifest。
-- **雜湊驗證**：winget 路徑會以發行者提供的 SHA-256 驗證安裝檔。直接下載路徑在執行前做三項檢查：(1) DOS `MZ` 標頭存在（擋掉 HTML 錯誤頁與截斷檔）；(2) Authenticode 簽章狀態為 `Valid`；(3) 簽署者主體包含 `REALiX`（HWiNFO 發行者）。任何其他發行者的「有效簽章」一樣會被拒絕。SHA-256 仍會寫入日誌供你自行稽核，但不 pin 固定值，因此官方重新簽章時可自動通過。
+- **雜湊驗證**：winget 路徑比對的是**套件 manifest 中記錄的 SHA-256**，不是另外由 REALiX 發布的雜湊值，因此不把它當成「發行者提供」。直接下載路徑在執行前做三項檢查：(1) PE 結構檢查（`MZ`、`e_lfanew` 處的 PE 簽章、機器類型非零、至少一個 section、PE32/PE32+ optional header）——這只是「外形」檢查，不能用來證明檔案完整；(2) Authenticode 簽章狀態為 `Valid`；(3) 以可處理引號的解析器取出憑證**組織欄位 `O`，並要求精確等於 `REALiX, s.r.o.`**。只含「REALiX」字樣或由其他發行者簽出的有效憑證都會被拒絕。比對的是法律實體而非憑證指紋，因此同一發行者換發新憑證仍可通過。
 - **`-InstallerPath` 同樣驗證**：你提供的安裝檔也要通過上述三項檢查，被掉包或損毀的檔案不會被執行。
+- **下載備援**：先寫入 `.part` 暫存檔，超過 10 MB 才會改名為正式檔；curl 失敗時先清掉不完整檔案，再試 `Invoke-WebRequest`。上次留下的截斷檔不會被當成成功下載。
+- **PID 誤殺防護**：`-StalePids` 只接受 `powershell`／`pwsh` 且命令列含本專案腳本路徑的行程；Windows 會重用 PID，單靠 ID 不足以證明身分。
 - **無憑證儲存**：腳本不保存任何憑證、token 或個人化設定，只讀取公開 HTTPS 端點與本機安裝資訊。
 - **權限透明**：提升權限由 Bootstrap 明確觸發 UAC；在新的電腦上請先審視腳本再按「是」。
 
-> 這套檢查**無法**防禦：官方 RSS 被入侵，或官方簽章程式碼簽章憑證被竊。因為信任錨點就是官方本身，RSS 被改寫或官方簽出的惡意安裝檔都會通過驗證。
+> 這套檢查**無法**防禦：官方 RSS 被入侵，或官方簽章程式碼簽章憑證被竊。因為信任錨點就是官方本身，RSS 被改寫或官方簽出的惡意安裝檔都會通過驗證。PE 結構檢查也無法證明檔案在簽章後沒被動過，完整性是由 Authenticode 負責。
 
 > 補充說明：force push 已把舊 commit 從分支歷史移除，但 GitHub 短期內仍可能透過舊 SHA 直接存取該物件；若要求澈底清除，需向 GitHub Support 提出請求。
 

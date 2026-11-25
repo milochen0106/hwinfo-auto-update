@@ -59,7 +59,15 @@ function Get-LatestStableVersionFromXml {
 function Test-PeFile {
     <#
     .SYNOPSIS
-        Returns $true when the file starts with the DOS "MZ" signature.
+        Returns $true when the file has a structurally plausible PE header.
+
+    .DESCRIPTION
+        Checks more than the DOS "MZ" signature: the PE signature at e_lfanew, a
+        non-zero machine type, at least one section, and an optional-header magic
+        of PE32 (0x10B) or PE32+ (0x20B). This rejects HTML error pages and files
+        truncated anywhere before the optional header, but it is still a shape
+        check, not proof of integrity: the Authenticode signature check in
+        Test-TrustedInstaller is what establishes that the content is the vendor's.
     #>
     param([Parameter(Mandatory)][string] $Path)
 
@@ -69,28 +77,85 @@ function Test-PeFile {
 
     $stream = [IO.File]::OpenRead($Path)
     try {
-        $mz1 = $stream.ReadByte()
-        $mz2 = $stream.ReadByte()
-        return ($mz1 -eq 0x4D -and $mz2 -eq 0x5A)
+        if ($stream.Length -lt 0x40) { return $false }
+
+        $reader = New-Object IO.BinaryReader($stream)
+        if ($reader.ReadUInt16() -ne 0x5A4D) { return $false }   # 'MZ'
+
+        $stream.Position = 0x3C                                  # e_lfanew
+        $peOffset = $reader.ReadUInt32()
+        if ($peOffset -lt 0x40 -or ($peOffset + 0x18) -gt $stream.Length) { return $false }
+
+        $stream.Position = $peOffset
+        if ($reader.ReadUInt32() -ne 0x00004550) { return $false }   # 'PE' + NUL NUL
+
+        $machine      = $reader.ReadUInt16()
+        $sections     = $reader.ReadUInt16()
+        $null         = $reader.ReadUInt32()   # TimeDateStamp
+        $null         = $reader.ReadUInt32()   # PointerToSymbolTable
+        $null         = $reader.ReadUInt32()   # NumberOfSymbols
+        $optionalSize = $reader.ReadUInt16()
+        $null         = $reader.ReadUInt16()   # Characteristics
+
+        if ($machine -eq 0 -or $sections -eq 0 -or $optionalSize -lt 2) { return $false }
+        if (($stream.Position + 2) -gt $stream.Length) { return $false }
+
+        $magic = $reader.ReadUInt16()
+        return ($magic -eq 0x010B -or $magic -eq 0x020B)         # PE32 / PE32+
     } finally {
         $stream.Dispose()
     }
 }
 
+function Get-CertificateSubjectField {
+    <#
+    .SYNOPSIS
+        Extracts one field (for example O or CN) from a rendered certificate subject.
+
+    .DESCRIPTION
+        Values that contain a comma are quoted in a rendered subject, for example
+        O="REALiX, s.r.o."; splitting on commas would therefore be wrong. The
+        parser honours double quotes and returns $null when the field is absent.
+
+    .EXAMPLE
+        Get-CertificateSubjectField -DistinguishedName 'CN="A, B", O="A, B"' -Field 'O'  # -> A, B
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string] $DistinguishedName,
+        [Parameter(Mandatory)][string] $Field
+    )
+
+    # (?:^|,\s*) anchors on a field boundary so that O does not match OID.2.5.4.15.
+    $pattern = '(?:^|,\s*){0}\s*=\s*(?:"([^"]*)"|([^,]*))' -f [regex]::Escape($Field)
+    $match   = [regex]::Match($DistinguishedName, $pattern)
+    if (-not $match.Success) { return $null }
+    if ($match.Groups[1].Success) { return $match.Groups[1].Value }
+    return $match.Groups[2].Value.Trim()
+}
+
 function Test-TrustedInstaller {
     <#
     .SYNOPSIS
-        Validates the Authenticode signature of an installer and checks that
-        the signer subject matches the expected publisher.
+        Validates the Authenticode signature of an installer and checks that the
+        signer is the expected publisher.
 
     .DESCRIPTION
         A "Valid" Authenticode status alone is not enough: the certificate can
-        belong to any publisher. Both the status and the signer subject are
-        verified. The default subject pattern is the HWiNFO vendor REALiX.
+        belong to any publisher. The signer's organization field (O) must equal the
+        expected publisher exactly, so a certificate whose subject merely contains
+        the vendor name somewhere is rejected.
+
+        The comparison is on the legal entity, not on a certificate thumbprint: a
+        renewed certificate from the same publisher keeps working, while a stolen
+        certificate from another publisher does not.
+
+    .PARAMETER ExpectedPublisher
+        Exact organization name (the certificate's O field).
+        Default: REALiX, s.r.o. (the HWiNFO vendor).
     #>
     param(
         [Parameter(Mandatory)][string] $Path,
-        [string] $SubjectPattern = 'REALiX'
+        [string] $ExpectedPublisher = 'REALiX, s.r.o.'
     )
 
     if (-not (Test-Path -LiteralPath $Path)) {
@@ -104,10 +169,47 @@ function Test-TrustedInstaller {
     if (-not $signature.SignerCertificate) {
         throw 'Authenticode signature has no signer certificate'
     }
-    if ($signature.SignerCertificate.Subject -notmatch $SubjectPattern) {
-        throw "Unexpected signer: $($signature.SignerCertificate.Subject)"
+
+    $subject      = $signature.SignerCertificate.Subject
+    $organization = Get-CertificateSubjectField -DistinguishedName $subject -Field 'O'
+    if (-not $organization) {
+        throw "Signer certificate has no organization (O) field: $subject"
+    }
+    if ($organization -ne $ExpectedPublisher) {
+        throw "Unexpected publisher '$organization' (expected '$ExpectedPublisher')"
     }
     return $true
+}
+
+# ---------------------------------------------------------------- stale process cleanup
+function Test-StaleProcessMatch {
+    <#
+    .SYNOPSIS
+        Returns $true when a process looks like a leftover run of this project's scripts.
+
+    .DESCRIPTION
+        Windows reuses process IDs, so a PID recorded during an earlier failure may
+        belong to an unrelated program later. A process is only a safe target when
+        it is a PowerShell host and its command line names one of the expected
+        script paths.
+    #>
+    param(
+        [string] $ProcessName,
+        [string] $CommandLine,
+        [Parameter(Mandatory)][string[]] $ExpectedPaths
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ProcessName)) { return $false }
+    if ($ProcessName -notin @('powershell', 'pwsh')) { return $false }
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) { return $false }
+
+    foreach ($expected in $ExpectedPaths) {
+        if ([string]::IsNullOrWhiteSpace($expected)) { continue }
+        if ($CommandLine.IndexOf($expected, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return $true
+        }
+    }
+    return $false
 }
 
 # ---------------------------------------------------------------- input validation

@@ -74,12 +74,31 @@ Describe 'Get-LatestStableVersionFromXml' {
 }
 
 Describe 'Test-PeFile' {
+    BeforeAll {
+        $script:Notepad = Join-Path $env:SystemRoot 'System32\notepad.exe'
+
+        # Structural rejects: a bare MZ header, and an HTML error page saved as .exe.
+        $script:TruncatedExe = Join-Path $TestDrive 'truncated.exe'
+        [IO.File]::WriteAllBytes($script:TruncatedExe, [byte[]](0x4D, 0x5A, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00))
+
+        $script:HtmlExe = Join-Path $TestDrive 'page.exe'
+        Set-Content -LiteralPath $script:HtmlExe -Value '<html><body>403 Forbidden</body></html>' -Encoding ASCII
+    }
+
     It 'returns true for a Windows executable' -Skip:(-not (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32\notepad.exe'))) {
-        Test-PeFile -Path (Join-Path $env:SystemRoot 'System32\notepad.exe') | Should -BeTrue
+        Test-PeFile -Path $script:Notepad | Should -BeTrue
     }
 
     It 'returns false for a non-executable file' {
         Test-PeFile -Path (Join-Path $PSScriptRoot '..\README.md') | Should -BeFalse
+    }
+
+    It 'returns false for a file that only starts with MZ' {
+        Test-PeFile -Path $script:TruncatedExe | Should -BeFalse
+    }
+
+    It 'returns false for an HTML error page saved as .exe' {
+        Test-PeFile -Path $script:HtmlExe | Should -BeFalse
     }
 
     It 'throws for a missing file' {
@@ -87,17 +106,89 @@ Describe 'Test-PeFile' {
     }
 }
 
+Describe 'Get-CertificateSubjectField' {
+    It 'reads a quoted organization containing a comma' {
+        Get-CertificateSubjectField `
+            -DistinguishedName 'CN="REALiX, s.r.o.", O="REALiX, s.r.o.", C=SK' `
+            -Field 'O' | Should -Be 'REALiX, s.r.o.'
+    }
+
+    It 'reads an unquoted field' {
+        Get-CertificateSubjectField `
+            -DistinguishedName 'CN=Example Ltd, O=Example Ltd, C=GB' `
+            -Field 'O' | Should -Be 'Example Ltd'
+    }
+
+    It 'does not confuse O with OID fields' {
+        Get-CertificateSubjectField `
+            -DistinguishedName 'OID.2.5.4.15=Private Organization, O="REALiX, s.r.o."' `
+            -Field 'O' | Should -Be 'REALiX, s.r.o.'
+    }
+
+    It 'returns null when the field is absent' {
+        Get-CertificateSubjectField -DistinguishedName 'CN=Example Ltd' -Field 'O' |
+            Should -BeNullOrEmpty
+    }
+}
+
 Describe 'Test-TrustedInstaller' {
+    BeforeAll {
+        $script:Notepad = Join-Path $env:SystemRoot 'System32\notepad.exe'
+    }
+
     It 'accepts a valid Microsoft-signed binary when the publisher matches' -Skip:(-not (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32\notepad.exe'))) {
-        { Test-TrustedInstaller -Path (Join-Path $env:SystemRoot 'System32\notepad.exe') -SubjectPattern 'Microsoft' } | Should -Not -Throw
+        { Test-TrustedInstaller -Path $script:Notepad -ExpectedPublisher 'Microsoft Corporation' } | Should -Not -Throw
     }
 
     It 'rejects a validly signed binary from a different publisher' -Skip:(-not (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32\notepad.exe'))) {
-        { Test-TrustedInstaller -Path (Join-Path $env:SystemRoot 'System32\notepad.exe') -SubjectPattern 'REALiX' } | Should -Throw
+        { Test-TrustedInstaller -Path $script:Notepad } | Should -Throw '*Unexpected publisher*'
+    }
+
+    It 'rejects a publisher name that only appears inside a longer organization' -Skip:(-not (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32\notepad.exe'))) {
+        { Test-TrustedInstaller -Path $script:Notepad -ExpectedPublisher 'Microsoft' } | Should -Throw '*Unexpected publisher*'
     }
 
     It 'rejects an unsigned non-executable file' {
         { Test-TrustedInstaller -Path (Join-Path $PSScriptRoot '..\README.md') } | Should -Throw
+    }
+}
+
+Describe 'Test-StaleProcessMatch' {
+    BeforeAll {
+        $script:UpdateScript = 'C:\Scripts\Update-HWiNFO.ps1'
+    }
+
+    It 'accepts a PowerShell host that runs the update script' {
+        Test-StaleProcessMatch `
+            -ProcessName 'powershell' `
+            -CommandLine 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -File "C:\Scripts\Update-HWiNFO.ps1"' `
+            -ExpectedPaths $script:UpdateScript | Should -BeTrue
+    }
+
+    It 'accepts pwsh and is case-insensitive about the path' {
+        Test-StaleProcessMatch `
+            -ProcessName 'pwsh' `
+            -CommandLine 'C:\Program Files\PowerShell\7\pwsh.exe -File "c:\scripts\update-hwinfo.ps1"' `
+            -ExpectedPaths $script:UpdateScript | Should -BeTrue
+    }
+
+    It 'rejects the same command line when the host is not PowerShell' {
+        Test-StaleProcessMatch `
+            -ProcessName 'notepad' `
+            -CommandLine 'notepad.exe "C:\Scripts\Update-HWiNFO.ps1"' `
+            -ExpectedPaths $script:UpdateScript | Should -BeFalse
+    }
+
+    It 'rejects a PowerShell host that runs something else' {
+        Test-StaleProcessMatch `
+            -ProcessName 'powershell' `
+            -CommandLine 'powershell.exe -File "C:\Scripts\other.ps1"' `
+            -ExpectedPaths $script:UpdateScript | Should -BeFalse
+    }
+
+    It 'rejects a process without a readable command line' {
+        Test-StaleProcessMatch -ProcessName 'powershell' -CommandLine '' -ExpectedPaths $script:UpdateScript |
+            Should -BeFalse
     }
 }
 

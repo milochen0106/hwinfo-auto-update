@@ -1,5 +1,7 @@
 # HWiNFO Auto-Update
 
+[![tests](https://github.com/milochen0106/hwinfo-auto-update/actions/workflows/tests.yml/badge.svg)](https://github.com/milochen0106/hwinfo-auto-update/actions/workflows/tests.yml)
+
 > Languages: **English** | [繁體中文](README.zh-TW.md)
 
 A small, dependency-free PowerShell toolkit that watches the **official HWiNFO release feed** and silently upgrades HWiNFO 64 to the latest **stable** version when one is published.
@@ -43,7 +45,7 @@ It deliberately reacts to **stable** announcements only. Beta and release-candid
 | Official update signal | Parses `https://www.hwinfo.com/news.xml/`; selects `HWiNFO vX.YY released`, excludes `Beta`, `RC`, `pre-release`. |
 | Local version detection | Reads `HWiNFO64.EXE` `ProductVersion` (e.g. `8.52-6060` → `8.52`); install directory is detected from the Windows uninstall registry, with a Program Files fallback and a `-InstallDir` override. |
 | Settings preservation | Backs up `HWiNFO64.INI` with a timestamp before every upgrade. |
-| Silent upgrade | Primary path: `winget install --exact --force --silent` (winget verifies the publisher SHA-256). Fallback: direct download of the official installer + `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`, gated on a valid Authenticode signature from `REALiX, s.r.o.`. |
+| Silent upgrade | Primary path: `winget install --exact --force --silent` (winget compares the downloaded file with the SHA-256 recorded in its package manifest). Fallback: direct download of the official installer + `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`, gated on a valid PE structure, a `Valid` Authenticode signature and the exact publisher name `REALiX, s.r.o.`. |
 | Verification | Re-reads the installed version after the installer exits and fails the run if it did not reach the announced version. |
 | Process handling | Stops running `HWiNFO64` before the upgrade and waits for the process to actually exit (Inno Setup cannot replace files in use), then restarts it afterwards if it was running — including when the upgrade failed. |
 | Dry run | `-CheckOnly` reports the comparison and makes no changes. |
@@ -92,7 +94,7 @@ The commands in this README also pass `-ExecutionPolicy Bypass`, so a machine wi
 | HWiNFO 64 installed with the official Inno Setup installer | No — it is the application being updated | Version detection, backup, upgrade | The script exits with `Cannot locate HWiNFO64.EXE`. Use `-InstallDir` for a non-standard location. |
 | Administrator rights | No — granted through UAC | Writing to Program Files, registering a highest-privilege task | `-CheckOnly` still works; the actual upgrade and bootstrap will fail. |
 | Internet access to `www.hwinfo.com` | Yes — network connectivity | RSS feed, download page, installer | No version check is possible. |
-| `winget` (App Installer) | Usually yes on Windows 10 1809+ / Windows 11, but can be removed | **Preferred** upgrade path — validates the publisher SHA-256 | Optional: the script falls back to a direct download. |
+| `winget` (App Installer) | Usually yes on Windows 10 1809+ / Windows 11, but can be removed | **Preferred** upgrade path — checks the download against the SHA-256 in the package manifest | Optional: the script falls back to a direct download. |
 | `curl.exe` | Yes on Windows 10 1809+ / Windows 11 (`C:\Windows\System32\curl.exe`) | Fast fallback download from the official CDN | Optional: falls back to `Invoke-WebRequest`, which may receive `403` from the vendor CDN. |
 | Windows Task Scheduler (`Register-ScheduledTask`) | Yes — built in | Daily automation via the bootstrap | Manual runs still work; only the automatic schedule is unavailable. |
 
@@ -202,7 +204,7 @@ Unregister-ScheduledTask -TaskName 'HWiNFO-AutoUpdate' -Confirm:$false
 | `-TaskName` | string | `HWiNFO-AutoUpdate` | Scheduled task name. |
 | `-TaskTime` | string | `09:00` | Daily run time (`HH:mm`). |
 | `-InstallerPath` | string | none | Passed through to `Update-HWiNFO.ps1`. |
-| `-StalePids` | int[] | none | Process IDs of a previous stuck update to terminate before upgrading. Only the listed PIDs are touched. |
+| `-StalePids` | int[] | none | Process IDs of a previous stuck update to terminate before upgrading. Only listed PIDs are touched, and only if they are PowerShell processes whose command line names one of this project's scripts. |
 
 Note: when passing an array from `powershell -Command`, use `-StalePids @(1234,5678)`; `-StalePids 1234,5678` is parsed as a single string by PowerShell's command-line binding. `-TaskName` must be a valid task name (no `\ / : * ? " < > |`) and `-TaskTime` must be `HH:mm` in 24-hour form; both are validated before elevation, so a typo never leaves a half-configured task behind.
 
@@ -251,9 +253,9 @@ Install-Module Pester -MinimumVersion 5.5.0 -Force -Scope CurrentUser
 Invoke-Pester -Path ./tests -Output Detailed
 ```
 
-The suite is deliberately pure: it uses XML fixtures and Windows-signed binaries, so it never installs HWiNFO, never touches the network, and runs unprivileged. CI (`.github/workflows/tests.yml`) runs the same tests plus PSScriptAnalyzer with error severity on every push and pull request.
+The suite is deliberately pure: it uses XML fixtures and Windows-signed binaries, so it never installs HWiNFO, never touches the network, and runs unprivileged. CI (`.github/workflows/tests.yml`) runs the same tests plus PSScriptAnalyzer (error and warning severity) and a Windows PowerShell 5.1 parse check on every push and pull request. The badge at the top of this file links to the latest run on `main`; individual runs are also listed on the Actions tab.
 
-There are no tests that perform a real upgrade; that step is verified manually with `-CheckOnly` and by reading the log.
+There are no tests that perform a real upgrade or exercise elevation; those paths are verified manually with `-CheckOnly` and by reading the logs.
 
 ## Troubleshooting
 
@@ -266,26 +268,29 @@ There are no tests that perform a real upgrade; that step is verified manually w
 | `Access denied` on `Wait-Process` / `Stop-Process` | A non-elevated process cannot control an elevated one. | Perform the cleanup from the elevated bootstrap (`-StalePids`). |
 | A new Beta appears but nothing is installed | By design — Beta / RC announcements are filtered out. | Wait for the stable announcement, or edit `Get-LatestStableVersion` if you intentionally want pre-releases. |
 | HWiNFO window disappears briefly | The script stops it so Inno Setup can replace files, then restarts it. | Use `-NoRestore` if you prefer to restart it yourself. |
-| `Unexpected signer: ...` or `Authenticode signature is not valid` | The installer is not signed by REALiX (proxy / mirror HTML page / tampered file). | Download the installer again from `https://www.hwinfo.com/download/`; do not bypass the check. |
+| `Unexpected publisher '...'` or `Authenticode signature is not valid` | The installer is not signed by REALiX, s.r.o. (proxy / mirror HTML page / tampered file). | Download the installer again from `https://www.hwinfo.com/download/`; do not bypass the check. |
+| `Refusing to stop PID=...` | The recorded PID now belongs to a different program (Windows reuses PIDs). | Ignore it; nothing was killed. Re-check the PID before using `-StalePids` again. |
 | Update runs even though the local build looks newer | The feed only advertises `major.minor`; build numbers are not compared. | Leave `-AllowDowngrade` unset — the script then refuses to downgrade. |
 | The elevated bootstrap exits `0` but nothing happened | Windows blocked the parent from waiting on the higher-integrity child. | Read `Bootstrap-HWiNFO-AutoUpdate.log`. |
 | First scheduled run shows `267011` | Task has not run yet. | Nothing to do; check after the first scheduled time. |
 
 ## Security considerations
 
-- Version information comes only from the vendor's RSS feed; installers come from the vendor's download page or from the winget manifest that the vendor publishes.
-- The winget path validates the installer hash against the publisher-provided SHA-256 before installation.
+- Version information comes only from the vendor's RSS feed; installers come from the vendor's download page or from the winget manifest.
+- The winget path compares the downloaded file with the SHA-256 **recorded in the winget package manifest**. That value is maintained in the winget manifest, not separately published by REALiX, so it is not treated here as a vendor-provided hash.
 - The direct-download path validates the file before running it:
-  1. DOS `MZ` header present (rejects HTML error pages and truncated downloads);
+  1. PE structure check: `MZ`, a PE signature at `e_lfanew`, a non-zero machine type, at least one section, and a PE32/PE32+ optional header. This rejects HTML error pages and files truncated before the optional header, but it is only a **shape** check — it says nothing about integrity;
   2. Authenticode signature status is `Valid`;
-  3. the signer certificate subject contains `REALiX` (the HWiNFO vendor) — a valid signature from any other publisher is rejected.
-  The SHA-256 is then logged for your own auditing, but it is not pinned, so a vendor re-signing with the same publisher is accepted automatically.
-- `-InstallerPath` runs the same three checks, so a tampered file is rejected before execution.
+  3. the signer's **organization field (`O`) must equal `REALiX, s.r.o.` exactly**, after quote-aware parsing of the subject. A valid certificate from any other publisher, or one that merely *contains* the vendor name, is rejected. The comparison is on the legal entity rather than a thumbprint, so certificate renewal by the same publisher keeps working.
+  The SHA-256 is then logged for your own auditing, but it is not pinned.
+- `-InstallerPath` runs the same checks, so a tampered file is rejected before execution.
+- Downloads go to a `.part` file and are promoted only after a minimum-size check (10 MB); a failed `curl.exe` run discards its partial file before `Invoke-WebRequest` is tried. A stale or truncated file from an earlier run is never reused.
+- `-StalePids` refuses to stop a PID unless it belongs to `powershell`/`pwsh` **and** its command line names one of this project's scripts — Windows can reuse PIDs, so an ID alone is not proof of identity.
 - The scripts store no credentials, tokens, or personally identifiable configuration; they only read public HTTPS endpoints and local installation metadata.
 - Git commit metadata for this repository uses a GitHub noreply address; no personal email address is exposed in the public history.
 - UAC elevation is requested explicitly by the bootstrap. Review the script before approving elevation on a new machine.
 
-What this does **not** protect against: a compromised vendor feed or a stolen vendor code-signing certificate. Both an RSS hijack and a signed malicious installer would pass these checks, because the trust anchor is the vendor itself.
+What this does **not** protect against: a compromised vendor feed or a stolen vendor code-signing certificate. Both an RSS hijack and a signed malicious installer would pass these checks, because the trust anchor is the vendor itself. A full PE parse also cannot prove that the file was not modified *after* signing — the signature check is the integrity control.
 
 ## Limitations
 

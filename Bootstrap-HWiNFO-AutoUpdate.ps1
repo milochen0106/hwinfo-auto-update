@@ -117,14 +117,30 @@ Write-BootstrapLog 'Running with administrator privileges.'
 # ---------------------------------------------------------------- stale process cleanup
 foreach ($pidToStop in $StalePids) {
     if ($pidToStop -eq $PID) { continue }
-    $target = Get-Process -Id $pidToStop -ErrorAction SilentlyContinue
+
+    $target = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $pidToStop" -ErrorAction SilentlyContinue
     if (-not $target) {
         Write-BootstrapLog "Stale process PID=$pidToStop is not running; nothing to stop."
         continue
     }
+
+    # Windows reuses PIDs: the recorded ID may now belong to an unrelated program.
+    # Only PowerShell hosts whose command line names this project's scripts are
+    # considered safe targets.
+    $processName = [IO.Path]::GetFileNameWithoutExtension($target.Name)
+    $isExpected  = Test-StaleProcessMatch `
+        -ProcessName $processName `
+        -CommandLine $target.CommandLine `
+        -ExpectedPaths @($updateFile, $PSCommandPath)
+
+    if (-not $isExpected) {
+        Write-BootstrapLog "Refusing to stop PID=$($pidToStop): $($target.Name) is not a leftover run of this project's scripts. Re-check the PID before trying again."
+        continue
+    }
+
     try {
         Stop-Process -Id $pidToStop -Force -ErrorAction Stop
-        Write-BootstrapLog "Stopped stale process PID=$pidToStop ($($target.ProcessName))."
+        Write-BootstrapLog "Stopped stale process PID=$pidToStop ($($target.Name))."
     } catch {
         Write-BootstrapLog "Could not stop PID=$pidToStop : $($_.Exception.Message)"
     }

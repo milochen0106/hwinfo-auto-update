@@ -13,8 +13,9 @@ The trust anchor is the vendor, REALiX s.r.o.:
 
 - **Version signal**: the official RSS feed at `https://www.hwinfo.com/news.xml/`.
 - **winget path**: the installer hash is verified by winget against the vendor's manifest.
-- **Direct-download path**: the file must have a DOS `MZ` header, a `Valid` Authenticode signature, and a signer subject containing `REALiX`. The SHA-256 is logged for auditing but not pinned.
-- **`-InstallerPath`**: the same three checks run before execution.
+- **Direct-download path**: the file must have a structurally valid PE header, a `Valid` Authenticode signature, and an organization field (`O`) exactly equal to `REALiX, s.r.o.`. The SHA-256 is logged for auditing but not pinned. Downloads are staged in a `.part` file and must exceed 10 MB before use.
+- **`-InstallerPath`**: the same checks run before execution.
+- **`-StalePids`**: a PID is only stopped when the process is a PowerShell host whose command line names one of this project's scripts.
 
 Explicitly out of scope for these checks: a compromised vendor feed, or a leaked vendor code-signing key. Both would produce input that passes every check, because the vendor is the only trusted party.
 
