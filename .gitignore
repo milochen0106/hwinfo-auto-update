@@ -1,0 +1,14 @@
+# Runtime artifacts
+*.log
+HWiNFO-Backups/
+
+# Downloaded installers
+*.exe
+*.zip
+
+#OS/editor files
+Thumbs.db
+Desktop.ini
+.DS_Store
+.vscode/
+.idea/
